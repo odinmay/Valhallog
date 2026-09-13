@@ -1,0 +1,64 @@
+Screen {
+    background: $surface;
+}
+
+#body {
+    height: 1fr;
+}
+
+#controls {
+    height: 3;
+    padding: 0 1;
+    align: left middle;
+}
+
+#level-select {
+    width: 18;
+}
+
+#status {
+    width: 1fr;
+    content-align: right middle;
+}
+
+#main-content {
+    height: 1fr;
+}
+
+#source-pane {
+    width: 28;
+    border-right: solid $panel;
+}
+
+#log-pane {
+    width: 1fr;
+}
+
+.pane-title {
+    height: 1;
+    padding: 0 1;
+    text-style: bold;
+}
+
+HelpScreen {
+    align: center middle;
+    background: $background 80%;
+}
+
+#help-dialog {
+    width: 62;
+    height: auto;
+    padding: 1 2;
+    border: solid $panel;
+    background: $surface;
+}
+
+#help-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#close-help {
+    margin-top: 1;
+    width: 12;
+}

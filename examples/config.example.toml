@@ -1,0 +1,39 @@
+version = 1
+
+[viewer]
+initial_lines = 1500
+follow_poll_ms = 500
+default_level = "all"
+
+[[sources]]
+name = "System Logs"
+type = "directory"
+path = "/var/log"
+recursive = true
+
+[[sources]]
+name = "User Xorg Logs"
+type = "directory"
+path = "~/.local/share/xorg"
+recursive = false
+optional = true
+
+[[sources]]
+name = "System Journal"
+type = "journal"
+mode = "system"
+
+[[sources]]
+name = "Current Boot"
+type = "journal"
+mode = "boot"
+
+[[sources]]
+name = "Kernel"
+type = "journal"
+mode = "kernel"
+
+[[sources]]
+name = "Errors"
+type = "journal"
+mode = "errors"

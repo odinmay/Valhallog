@@ -1,0 +1,253 @@
+from pathlib import Path
+
+from textual.widgets import Footer, Header, RichLog, Select, Static, Tree
+
+from valhallog.app import HelpScreen, ValhallogApp
+from valhallog.config import ConfigError
+from valhallog.models import AppConfig, SourceConfig, ViewerConfig
+
+
+def test_app_renders_hello_screen(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test configuration error")),
+    )
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            assert app.query_one(Header)
+            assert app.query_one(Footer)
+            assert app.query_one("#source-tree", Tree)
+            assert app.query_one("#log-viewer", RichLog)
+            assert app.query_one("#level-select", Select).value == "all"
+            assert "Hello Valhallog" in str(app.query_one("#log-viewer", RichLog).lines[0])
+            assert app.query_one("#source-tree", Tree).root.children
+
+            focused_before_tab = app.focused
+            await pilot.press("tab")
+            assert focused_before_tab is not None
+            assert app.focused is not focused_before_tab
+            await pilot.press("?")
+            assert isinstance(app.screen, HelpScreen)
+            assert "Valhallog Help" in str(
+                app.screen.query_one("#help-title", Static).render()
+            )
+            await pilot.press("escape")
+            await pilot.press("q")
+
+    import asyncio
+
+    asyncio.run(run_test())
+
+
+def test_app_displays_configured_sources(monkeypatch, tmp_path: Path) -> None:
+    logs_path = tmp_path / "logs"
+    logs_path.mkdir()
+    (logs_path / "example.log").write_text("ERROR: example\n")
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(default_level="error", follow_poll_ms=10),
+            sources=(
+                SourceConfig(
+                    name="Example Logs",
+                    type="directory",
+                    path=logs_path,
+                ),
+            ),
+        ),
+    )
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            source_tree = app.query_one("#source-tree", Tree)
+            assert str(source_tree.root.children[0].label) == "Example Logs"
+            assert str(source_tree.root.children[0].children[0].label) == "example.log"
+            assert app.query_one("#level-select", Select).value == "error"
+
+            source_tree.select_node(source_tree.root.children[0].children[0])
+            await pilot.pause()
+            log_viewer = app.query_one("#log-viewer", RichLog)
+            assert [line.text for line in log_viewer.lines] == ["ERROR: example"]
+            assert str(app.query_one("#log-title", Static).render()) == "example.log"
+            assert "Loaded 1 of 1 line" in str(
+                app.query_one("#status", Static).render()
+            )
+
+            level_select = app.query_one("#level-select", Select)
+            level_select.value = "critical"
+            await pilot.pause()
+            assert list(log_viewer.lines) == []
+            level_select.value = "error"
+            await pilot.pause()
+            assert [line.text for line in log_viewer.lines] == ["ERROR: example"]
+
+            await pilot.press("?")
+            assert isinstance(app.screen, HelpScreen)
+            assert "config.toml" in str(
+                app.screen.query_one("#help-content", Static).render()
+            )
+            await pilot.press("escape")
+
+            await pilot.press("f")
+            assert app._following is True
+            with (logs_path / "example.log").open("a") as log_file:
+                log_file.write("ERROR: followed\n")
+                log_file.flush()
+            await pilot.pause(0.1)
+            assert [line.text for line in log_viewer.lines] == [
+                "ERROR: example",
+                "ERROR: followed",
+            ]
+
+            await pilot.press("f")
+            assert app._following is False
+            with (logs_path / "example.log").open("a") as log_file:
+                log_file.write("ERROR: ignored\n")
+                log_file.flush()
+            await pilot.pause(0.05)
+            assert [line.text for line in log_viewer.lines] == [
+                "ERROR: example",
+                "ERROR: followed",
+            ]
+            await pilot.press("q")
+
+    import asyncio
+
+    asyncio.run(run_test())
+
+
+def test_app_displays_journal_source(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(initial_lines=25),
+            sources=(
+                SourceConfig(name="Current Boot", type="journal", mode="boot"),
+            ),
+        ),
+    )
+
+    class FakeJournalReader:
+        def __init__(self, source: SourceConfig):
+            self.source = source
+
+        async def iter_lines(self, max_lines: int, level: str, follow: bool = False):
+            assert max_lines == 25
+            assert level == "all"
+            if follow:
+                yield "live journal line"
+                await asyncio.Event().wait()
+            else:
+                yield "journal line one"
+                yield "journal line two"
+
+    monkeypatch.setattr("valhallog.app.JournalReader", FakeJournalReader)
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            source_tree = app.query_one("#source-tree", Tree)
+            source_tree.select_node(source_tree.root.children[0])
+            await pilot.pause()
+
+            log_viewer = app.query_one("#log-viewer", RichLog)
+            assert [line.text for line in log_viewer.lines] == [
+                "journal line one",
+                "journal line two",
+            ]
+            assert str(app.query_one("#log-title", Static).render()) == "Current Boot"
+            assert "Loaded 2 journal line" in str(
+                app.query_one("#status", Static).render()
+            )
+
+            await pilot.press("f")
+            assert app._following is True
+            await pilot.pause()
+            assert "live journal line" in [line.text for line in log_viewer.lines]
+            await pilot.press("f")
+            assert app._following is False
+            await pilot.press("q")
+
+    asyncio.run(run_test())
+
+
+def test_file_read_runs_off_the_ui_thread(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+    import threading
+
+    logs_path = tmp_path / "logs"
+    logs_path.mkdir()
+    log_path = logs_path / "example.log"
+    log_path.write_text("background read\n")
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(),
+            sources=(SourceConfig(name="Logs", type="directory", path=logs_path),),
+        ),
+    )
+
+    ui_thread_id = threading.get_ident()
+    reader_thread_id = None
+
+    class FakeFileLogReader:
+        def __init__(self, path: Path):
+            assert path == log_path
+
+        def read_recent_lines(self, max_lines: int) -> list[str]:
+            nonlocal reader_thread_id
+            reader_thread_id = threading.get_ident()
+            return ["background read"]
+
+    monkeypatch.setattr("valhallog.app.FileLogReader", FakeFileLogReader)
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            source_tree = app.query_one("#source-tree", Tree)
+            source_tree.select_node(source_tree.root.children[0].children[0])
+            await pilot.pause()
+            assert reader_thread_id is not None
+            assert reader_thread_id != ui_thread_id
+            await pilot.press("q")
+
+    asyncio.run(run_test())
+
+
+def test_app_reports_empty_directory(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+
+    empty_path = tmp_path / "empty"
+    empty_path.mkdir()
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(),
+            sources=(
+                SourceConfig(name="Empty Logs", type="directory", path=empty_path),
+            ),
+        ),
+    )
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            source_tree = app.query_one("#source-tree", Tree)
+            assert "1 empty" in str(app.query_one("#status", Static).render())
+            source_tree.select_node(source_tree.root.children[0])
+            await pilot.pause()
+            assert "No readable text logs" in str(
+                app.query_one("#status", Static).render()
+            )
+            await pilot.press("q")
+
+    asyncio.run(run_test())
