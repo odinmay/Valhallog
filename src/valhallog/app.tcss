@@ -62,3 +62,76 @@ HelpScreen {
     margin-top: 1;
     width: 12;
 }
+
+AddSourceScreen {
+    align: center middle;
+    background: $background 80%;
+}
+
+#add-source-dialog {
+    width: 72;
+    height: 80%;
+    min-height: 18;
+    padding: 1 2;
+    border: solid $panel;
+    background: $surface;
+}
+
+#add-source-title {
+    text-style: bold;
+}
+
+#add-source-instructions {
+    margin-bottom: 1;
+}
+
+#add-source-tree {
+    height: 1fr;
+    border: solid $panel;
+}
+
+#add-source-selection {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+#add-source-name {
+    display: none;
+    margin-bottom: 1;
+}
+
+#add-source-actions {
+    height: 3;
+    align: right middle;
+}
+
+#add-source-actions Button {
+    margin-left: 1;
+}
+
+RenameSourceScreen {
+    align: center middle;
+    background: $background 80%;
+}
+
+#rename-source-dialog {
+    width: 52;
+    height: auto;
+    padding: 1 2;
+    border: solid $panel;
+    background: $surface;
+}
+
+#rename-source-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#rename-source-actions {
+    height: 3;
+    align: right middle;
+}
+
+#rename-source-actions Button {
+    margin-left: 1;
+}

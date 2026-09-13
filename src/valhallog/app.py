@@ -1,6 +1,7 @@
 """The runnable Valhallog application."""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
@@ -11,11 +12,22 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, RichLog, Select, Static, Tree
 from textual.worker import Worker, WorkerState, get_current_worker
 
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, resolve_user_home
+from .config_editor import (
+    SourceAlreadyExistsError,
+    add_directory_source,
+    rename_source,
+)
 from .filters import filter_lines, normalize_level, should_show
 from .models import AppConfig, SourceConfig
 from .sources.files import FileLogReader, scan_directory
 from .sources.journal import JournalError, JournalReader
+from .widgets.source_picker import (
+    AddSourceScreen,
+    AddSourceSelection,
+    RenameSourceScreen,
+)
+from .widgets.verbosity import VimVerbositySelect
 
 
 VIEWER_HISTORY_LIMIT = 2000
@@ -40,6 +52,13 @@ class HelpScreen(ModalScreen[None]):
             Static(
                 "q  Quit\n"
                 "f  Toggle follow for the selected source\n"
+                "a  Add a folder source\n"
+                "r  Rename the highlighted source\n"
+                "Shift+H  Focus sources\n"
+                "Shift+L  Focus log viewer\n"
+                "v  Focus verbosity menu\n"
+                "j/k  Move through sources or scroll logs\n"
+                "h/l  Collapse or expand/open\n"
                 "Tab  Move focus\n"
                 "?  Open this help\n"
                 "Escape  Close this help\n\n"
@@ -81,6 +100,16 @@ class ValhallogApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("?", "show_help", "Help"),
+        Binding("a", "add_source", "Add source"),
+        Binding("r", "rename_source", "Rename source"),
+        # Printable shifted letters arrive from the terminal as uppercase keys.
+        Binding("H", "focus_sources", "Sources", key_display="Shift+H"),
+        Binding("L", "focus_log_viewer", "Log viewer", key_display="Shift+L"),
+        Binding("v", "focus_level_select", "Verbosity"),
+        Binding("j", "source_down", "Down"),
+        Binding("k", "source_up", "Up"),
+        Binding("h", "source_collapse", "Collapse"),
+        Binding("l", "source_expand_or_open", "Expand / Open"),
         Binding("tab", "focus_next", "Focus next"),
         Binding("f", "toggle_follow", "Follow"),
     ]
@@ -90,7 +119,7 @@ class ValhallogApp(App[None]):
         yield Header()
         yield Vertical(
             Horizontal(
-                Select(
+                VimVerbositySelect(
                     [
                         ("All", "all"),
                         ("Debug", "debug"),
@@ -100,6 +129,7 @@ class ValhallogApp(App[None]):
                         ("Critical", "critical"),
                     ],
                     value="all",
+                    allow_blank=False,
                     id="level-select",
                 ),
                 Static("Source: none | Level: ALL", id="status"),
@@ -150,55 +180,64 @@ class ValhallogApp(App[None]):
             self.config = config
             self._active_level = config.viewer.default_level
             self.query_one("#level-select", Select).value = config.viewer.default_level
-            file_count = 0
-            missing_count = 0
-            empty_count = 0
-            for source in config.sources:
-                if source.type == "directory":
-                    if source.path is None or not source.path.is_dir():
-                        missing_count += 1
-                        missing_label = (
-                            " (optional, missing)" if source.optional else " (missing)"
-                        )
-                        source_tree.root.add(
-                            source.name + missing_label,
-                            data=source,
-                            allow_expand=False,
-                        )
-                        continue
-
-                    source_node = source_tree.root.add(
-                        source.name,
-                        data=source,
-                        expand=True,
-                    )
-                    files = scan_directory(source.path, source.recursive)
-                    file_count += len(files)
-                    if not files:
-                        empty_count += 1
-                    for file_path in files:
-                        source_node.add(
-                            str(file_path.relative_to(source.path)),
-                            data=file_path,
-                            allow_expand=False,
-                        )
-                else:
-                    source_tree.root.add(source.name, data=source, allow_expand=False)
-
-            source_tree.root.expand()
-            missing_text = f"; {missing_count} missing" if missing_count else ""
-            empty_text = f"; {empty_count} empty" if empty_count else ""
-            if config.sources:
-                status.update(
-                    f"Loaded {len(config.sources)} source(s), {file_count} file(s)"
-                    f"{missing_text}{empty_text}"
-                )
-            else:
-                status.update("No configured sources")
+            self._refresh_source_tree()
 
         log_viewer = self.query_one("#log-viewer", RichLog)
         log_viewer.write("Hello Valhallog")
         log_viewer.write("The log viewer will grow here.")
+
+    def _refresh_source_tree(self) -> None:
+        """Rebuild the source tree after loading or adding a source."""
+        if self.config is None:
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        status = self.query_one("#status", Static)
+        source_tree.root.remove_children()
+        file_count = 0
+        missing_count = 0
+        empty_count = 0
+        for source in self.config.sources:
+            if source.type == "directory":
+                if source.path is None or not source.path.is_dir():
+                    missing_count += 1
+                    missing_label = (
+                        " (optional, missing)" if source.optional else " (missing)"
+                    )
+                    source_tree.root.add(
+                        source.name + missing_label,
+                        data=source,
+                        allow_expand=False,
+                    )
+                    continue
+
+                source_node = source_tree.root.add(
+                    source.name,
+                    data=source,
+                    expand=True,
+                )
+                files = scan_directory(source.path, source.recursive)
+                file_count += len(files)
+                if not files:
+                    empty_count += 1
+                for file_path in files:
+                    source_node.add(
+                        str(file_path.relative_to(source.path)),
+                        data=file_path,
+                        allow_expand=False,
+                    )
+            else:
+                source_tree.root.add(source.name, data=source, allow_expand=False)
+
+        source_tree.root.expand()
+        missing_text = f"; {missing_count} missing" if missing_count else ""
+        empty_text = f"; {empty_count} empty" if empty_count else ""
+        if self.config.sources:
+            status.update(
+                f"Loaded {len(self.config.sources)} source(s), {file_count} file(s)"
+                f"{missing_text}{empty_text}"
+            )
+        else:
+            status.update("No configured sources")
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Load the selected file or virtual journal source."""
@@ -565,6 +604,163 @@ class ValhallogApp(App[None]):
     def on_unmount(self) -> None:
         """Stop the polling worker when the app exits."""
         self._stop_readers()
+
+    def action_add_source(self) -> None:
+        """Open the home-directory picker for one new folder source."""
+        if self.config is None:
+            self.query_one("#status", Static).update(
+                "Cannot add a source until the configuration is loaded"
+            )
+            return
+        self.push_screen(AddSourceScreen(resolve_user_home()), self._add_source)
+
+    def action_focus_sources(self) -> None:
+        """Focus the left sources panel."""
+        self.query_one("#source-tree", Tree).focus()
+
+    def action_focus_log_viewer(self) -> None:
+        """Focus the right log viewer panel."""
+        self.query_one("#log-viewer", RichLog).focus()
+
+    def action_focus_level_select(self) -> None:
+        """Focus the log-level selector."""
+        level_select = self.query_one("#level-select", Select)
+        level_select.focus()
+        level_select.action_show_overlay()
+
+    def _source_cursor(self) -> tuple[Tree, object] | None:
+        """Return the source tree and its highlighted node, if any."""
+        source_tree = self.query_one("#source-tree", Tree)
+        node = source_tree.cursor_node
+        return (source_tree, node) if node is not None else None
+
+    def action_source_down(self) -> None:
+        """Scroll the log or move the source-tree cursor down."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_scroll_down()
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        source_tree.focus()
+        source_tree.action_cursor_down()
+
+    def action_source_up(self) -> None:
+        """Scroll the log or move the source-tree cursor up."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_scroll_up()
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        source_tree.focus()
+        source_tree.action_cursor_up()
+
+    def action_source_collapse(self) -> None:
+        """Collapse the highlighted source or its parent folder."""
+        cursor = self._source_cursor()
+        if cursor is None:
+            return
+        source_tree, node = cursor
+        if node.allow_expand:
+            node.collapse()
+            return
+        parent = node.parent
+        if parent is not None and parent.allow_expand:
+            parent.collapse()
+            source_tree.move_cursor(parent)
+
+    def action_source_expand_or_open(self) -> None:
+        """Expand a source node, or open a highlighted log file/source."""
+        cursor = self._source_cursor()
+        if cursor is None:
+            return
+        source_tree, node = cursor
+        if node.allow_expand:
+            node.expand()
+        else:
+            source_tree.select_node(node)
+
+    def _add_source(self, selection: AddSourceSelection | None) -> None:
+        """Persist a confirmed picker selection and refresh the source tree."""
+        if selection is None or self.config is None:
+            return
+
+        status = self.query_one("#status", Static)
+        try:
+            home = resolve_user_home().resolve(strict=False)
+            selected_path = selection.path.resolve(strict=False)
+            if not selected_path.is_relative_to(home):
+                raise ValueError("The selected folder must be inside your home directory")
+            source = add_directory_source(
+                self.config.config_path,
+                selected_path,
+                recursive=selection.recursive,
+                user_home=home,
+                name=selection.name,
+            )
+        except SourceAlreadyExistsError as exc:
+            status.update(str(exc))
+            return
+        except (OSError, ValueError) as exc:
+            status.update(f"Could not add source: {exc}")
+            return
+
+        self.config = replace(self.config, sources=(*self.config.sources, source))
+        self._refresh_source_tree()
+        status.update(
+            f"Added source '{source.name}' | Recursive: "
+            f"{'ON' if source.recursive else 'OFF'}"
+        )
+
+    def action_rename_source(self) -> None:
+        """Open the rename dialog for the highlighted source node."""
+        if self.config is None:
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        node = source_tree.cursor_node
+        if node is None or not isinstance(node.data, SourceConfig):
+            self.query_one("#status", Static).update(
+                "Highlight a configured source before renaming it"
+            )
+            return
+        source = node.data
+        self.push_screen(
+            RenameSourceScreen(source.name),
+            lambda new_name, source=source: self._rename_source(source, new_name),
+        )
+
+    def _rename_source(self, source: SourceConfig, new_name: str | None) -> None:
+        """Persist a confirmed rename and update the in-memory source."""
+        if new_name is None or self.config is None:
+            return
+        status = self.query_one("#status", Static)
+        try:
+            renamed = rename_source(
+                self.config.config_path,
+                source,
+                new_name=new_name,
+                user_home=resolve_user_home(),
+            )
+        except (OSError, ValueError) as exc:
+            status.update(f"Could not rename source: {exc}")
+            return
+
+        was_selected = self._selected_source is source
+        if was_selected:
+            self._stop_readers()
+        sources = list(self.config.sources)
+        try:
+            source_index = sources.index(source)
+        except ValueError:
+            status.update(f"Could not rename source: {source.name} was not found")
+            return
+        sources[source_index] = renamed
+        self.config = replace(self.config, sources=tuple(sources))
+        if was_selected:
+            self._selected_source = renamed
+        self._refresh_source_tree()
+        status.update(f"Renamed source to '{renamed.name}'")
+        if was_selected:
+            self._start_journal_load(renamed, self.config.viewer.initial_lines)
 
     def action_show_help(self) -> None:
         """Open the keyboard reference modal."""

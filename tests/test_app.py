@@ -21,6 +21,9 @@ def test_app_renders_hello_screen(monkeypatch) -> None:
             assert app.query_one("#source-tree", Tree)
             assert app.query_one("#log-viewer", RichLog)
             assert app.query_one("#level-select", Select).value == "all"
+            assert "(V)ERBOSITY All" in str(
+                app.query_one("#level-select #label", Static).render()
+            )
             assert "Hello Valhallog" in str(app.query_one("#log-viewer", RichLog).lines[0])
             assert app.query_one("#source-tree", Tree).root.children
 
@@ -248,6 +251,71 @@ def test_app_reports_empty_directory(monkeypatch, tmp_path: Path) -> None:
             assert "No readable text logs" in str(
                 app.query_one("#status", Static).render()
             )
+            await pilot.press("q")
+
+    asyncio.run(run_test())
+
+
+def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=Path("/tmp/config.toml"),
+            viewer=ViewerConfig(),
+            sources=(),
+        ),
+    )
+    scroll_calls: list[str] = []
+    source_calls: list[str] = []
+
+    def record_scroll_up(self) -> None:
+        scroll_calls.append("up")
+
+    def record_scroll_down(self) -> None:
+        scroll_calls.append("down")
+
+    def record_source_up(self) -> None:
+        source_calls.append("up")
+
+    def record_source_down(self) -> None:
+        source_calls.append("down")
+
+    monkeypatch.setattr(RichLog, "action_scroll_up", record_scroll_up)
+    monkeypatch.setattr(RichLog, "action_scroll_down", record_scroll_down)
+    monkeypatch.setattr(Tree, "action_cursor_up", record_source_up)
+    monkeypatch.setattr(Tree, "action_cursor_down", record_source_down)
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            log_viewer = app.query_one("#log-viewer", RichLog)
+            source_tree = app.query_one("#source-tree", Tree)
+            await pilot.press("H")
+            assert app.focused is source_tree
+            await pilot.press("L")
+            assert app.focused is log_viewer
+            await pilot.press("v")
+            level_select = app.query_one("#level-select", Select)
+            assert app.focused is level_select.query_one("SelectOverlay")
+            await pilot.press("j")
+            assert level_select.query_one("SelectOverlay").highlighted == 1
+            await pilot.press("k")
+            assert level_select.query_one("SelectOverlay").highlighted == 0
+            await pilot.press("j", "l")
+            await pilot.pause()
+            assert level_select.value == "debug"
+            assert level_select.expanded is False
+
+            log_viewer.focus()
+            await pilot.press("k", "j")
+            assert scroll_calls == ["up", "down"]
+            assert source_calls == []
+
+            source_tree.focus()
+            await pilot.press("k", "j")
+            assert source_calls == ["up", "down"]
             await pilot.press("q")
 
     asyncio.run(run_test())

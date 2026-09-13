@@ -9,6 +9,7 @@ description = "A simple Textual interface for browsing system logs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "tomlkit>=0.13",
     "textual>=1.0",
 ]
 
