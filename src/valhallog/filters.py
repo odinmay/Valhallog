@@ -34,6 +34,14 @@ def classify_line(line: str) -> str:
     return "info"
 
 
+def classify_token(token: str) -> str | None:
+    """Return the severity represented by one recognized token."""
+    for level, pattern in _TOKEN_LEVELS:
+        if pattern.fullmatch(token):
+            return level
+    return None
+
+
 def should_show(line: str, minimum_level: str) -> bool:
     """Return whether a line meets the selected minimum severity."""
     level = normalize_level(minimum_level)

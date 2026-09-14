@@ -5,9 +5,11 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, RichLog, Select, Static, Tree
 from textual.worker import Worker, WorkerState, get_current_worker
@@ -19,6 +21,7 @@ from .config_editor import (
     rename_source,
 )
 from .filters import filter_lines, normalize_level, should_show
+from .highlighting import highlight_log_line
 from .models import AppConfig, SourceConfig
 from .sources.files import FileLogReader, scan_directory
 from .sources.journal import JournalError, JournalReader
@@ -31,6 +34,41 @@ from .widgets.verbosity import VimVerbositySelect
 
 
 VIEWER_HISTORY_LIMIT = 2000
+SOURCE_PANEL_DEFAULT_PERCENT = 20
+SOURCE_PANEL_MIN_PERCENT = 15
+SOURCE_PANEL_MAX_PERCENT = 60
+SOURCE_PANEL_STEP_PERCENT = 5
+_VALKNUT_BASE = r"""
+ ___      ___ ________  ___  ___  ________  ___       ___       ________  ________ 
+|\  \    /  /|\   __  \|\  \|\  \|\   __  \|\  \     |\  \     |\   __  \|\   ____\    
+\ \  \  /  / | \  \|\  \ \  \\\  \ \  \|\  \ \  \    \ \  \    \ \  \|\  \ \  \___|    
+ \ \  \/  / / \ \   __  \ \   __  \ \   __  \ \  \    \ \  \    \ \  \\\  \ \  \  ___  
+  \ \    / /   \ \  \ \  \ \  \ \  \ \  \ \  \ \  \____\ \  \____\ \  \\\  \ \  \|\  \ 
+   \ \__/ /     \ \__\ \__\ \__\ \__\ \__\ \__\ \_______\ \_______\ \_______\ \_______\
+    \|__|/       \|__|\|__|\|__|\|__|\|__|\|__|\|_______|\|_______|\|_______|\|_______|
+"""
+
+
+def _valknut_splash(_width: int, _height: int) -> str:
+    """Build the exact ASCII artwork while preserving each line's spacing."""
+    base_lines = _VALKNUT_BASE.strip("\n").splitlines()
+    base_width = max(map(len, base_lines))
+    padded_lines = [line.ljust(base_width) for line in base_lines]
+    return "\n".join((*padded_lines, ""))
+
+
+class ValknutSplash(Static):
+    """Display a responsive ASCII Valknut in the empty log pane."""
+
+    def on_mount(self) -> None:
+        self._refresh_art()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self._refresh_art()
+
+    def _refresh_art(self) -> None:
+        if self.size.width and self.size.height:
+            self.update(_valknut_splash(self.size.width, self.size.height))
 
 
 class HelpScreen(ModalScreen[None]):
@@ -54,11 +92,14 @@ class HelpScreen(ModalScreen[None]):
                 "f  Toggle follow for the selected source\n"
                 "a  Add a folder source\n"
                 "r  Rename the highlighted source\n"
-                "Shift+H  Focus sources\n"
-                "Shift+L  Focus log viewer\n"
                 "v  Focus verbosity menu\n"
                 "j/k  Move through sources or scroll logs\n"
-                "h/l  Collapse or expand/open\n"
+                "Shift+J/K  Page through logs\n"
+                "Shift+H  Focus sources\n"
+                "Shift+L  Focus log viewer\n"
+                "h  Scroll left or collapse\n"
+                "l  Scroll right or expand/open\n"
+                "+/-  Widen or narrow the sources panel\n"
                 "Tab  Move focus\n"
                 "?  Open this help\n"
                 "Escape  Close this help\n\n"
@@ -102,17 +143,69 @@ class ValhallogApp(App[None]):
         Binding("?", "show_help", "Help"),
         Binding("a", "add_source", "Add source"),
         Binding("r", "rename_source", "Rename source"),
-        # Printable shifted letters arrive from the terminal as uppercase keys.
-        Binding("H", "focus_sources", "Sources", key_display="Shift+H"),
-        Binding("L", "focus_log_viewer", "Log viewer", key_display="Shift+L"),
         Binding("v", "focus_level_select", "Verbosity"),
         Binding("j", "source_down", "Down"),
         Binding("k", "source_up", "Up"),
-        Binding("h", "source_collapse", "Collapse"),
-        Binding("l", "source_expand_or_open", "Expand / Open"),
+        Binding("J", "log_page_down", "Page down", key_display="Shift+J"),
+        Binding("K", "log_page_up", "Page up", key_display="Shift+K"),
+        # Printable shifted letters arrive from the terminal as uppercase keys.
+        Binding("H", "focus_sources", "Sources", key_display="Shift+H"),
+        Binding("L", "focus_log_viewer", "Log viewer", key_display="Shift+L"),
+        Binding("h", "vim_left", "Left"),
+        Binding("l", "vim_right", "Right"),
+        Binding("plus,equals_sign", "increase_source_panel", "Wider", key_display="+ / ="),
+        Binding("minus", "decrease_source_panel", "Narrower"),
         Binding("tab", "focus_next", "Focus next"),
         Binding("f", "toggle_follow", "Follow"),
     ]
+
+    _HIDDEN_WHILE_VERBOSITY_MENU_OPEN = frozenset(
+        {
+            "show_help",
+            "add_source",
+            "rename_source",
+            "focus_level_select",
+            "source_down",
+            "source_up",
+            "log_page_down",
+            "log_page_up",
+            "focus_sources",
+            "focus_log_viewer",
+            "vim_left",
+            "vim_right",
+            "increase_source_panel",
+            "decrease_source_panel",
+            "toggle_follow",
+            "command_palette",
+        }
+    )
+    _HIDDEN_WHILE_LOG_VIEWER_FOCUSED = frozenset(
+        {
+            "add_source",
+            "rename_source",
+        }
+    )
+    _HIDDEN_WHILE_SOURCE_TREE_FOCUSED = frozenset(
+        {
+            "log_page_down",
+            "log_page_up",
+        }
+    )
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide shortcuts that don't apply to the current focus context."""
+        try:
+            menu_open = self.query_one("#level-select", Select).expanded
+        except NoMatches:
+            menu_open = False
+        if menu_open and action in self._HIDDEN_WHILE_VERBOSITY_MENU_OPEN:
+            return False
+        focused = self.focused
+        if isinstance(focused, RichLog) and action in self._HIDDEN_WHILE_LOG_VIEWER_FOCUSED:
+            return False
+        if isinstance(focused, Tree) and action in self._HIDDEN_WHILE_SOURCE_TREE_FOCUSED:
+            return False
+        return super().check_action(action, parameters)
 
     def compose(self) -> ComposeResult:
         """Describe the widgets that make up the first screen."""
@@ -143,6 +236,7 @@ class ValhallogApp(App[None]):
                 ),
                 Vertical(
                     Static("Hello Valhallog", id="log-title", classes="pane-title"),
+                    ValknutSplash(id="splash"),
                     RichLog(
                         id="log-viewer",
                         highlight=False,
@@ -159,6 +253,7 @@ class ValhallogApp(App[None]):
 
     def on_mount(self) -> None:
         """Load configured source names while keeping the UI responsive."""
+        self._source_width_percent = SOURCE_PANEL_DEFAULT_PERCENT
         self._selected_path = None
         self._selected_source = None
         self._active_level = "all"
@@ -182,9 +277,7 @@ class ValhallogApp(App[None]):
             self.query_one("#level-select", Select).value = config.viewer.default_level
             self._refresh_source_tree()
 
-        log_viewer = self.query_one("#log-viewer", RichLog)
-        log_viewer.write("Hello Valhallog")
-        log_viewer.write("The log viewer will grow here.")
+        self.query_one("#splash", ValknutSplash).styles.display = "block"
 
     def _refresh_source_tree(self) -> None:
         """Rebuild the source tree after loading or adding a source."""
@@ -268,6 +361,7 @@ class ValhallogApp(App[None]):
 
     def _start_file_load(self, path: Path, max_lines: int) -> None:
         """Start a background read for the selected file."""
+        self.query_one("#splash", Static).styles.display = "none"
         log_viewer = self.query_one("#log-viewer", RichLog)
         log_title = self.query_one("#log-title", Static)
         status = self.query_one("#status", Static)
@@ -349,7 +443,7 @@ class ValhallogApp(App[None]):
         log_viewer = self.query_one("#log-viewer", RichLog)
         log_viewer.clear()
         for line in visible_lines:
-            log_viewer.write(line)
+            log_viewer.write(highlight_log_line(line))
         self.query_one("#status", Static).update(
             f"Loaded {len(visible_lines)} of {len(self._raw_lines)} line(s) from "
             f"{self._selected_path} | Filter: {self._active_level.upper()}"
@@ -373,6 +467,7 @@ class ValhallogApp(App[None]):
 
     def _start_journal_load(self, source: SourceConfig, max_lines: int) -> None:
         """Clear the viewer and start reading a virtual journal source."""
+        self.query_one("#splash", Static).styles.display = "none"
         self.query_one("#log-title", Static).update(source.name)
         self.query_one("#log-viewer", RichLog).clear()
         self._raw_lines = None
@@ -398,7 +493,7 @@ class ValhallogApp(App[None]):
             async for line in JournalReader(source).iter_lines(max_lines, level):
                 if self._selected_source is not source:
                     return
-                log_viewer.write(line)
+                log_viewer.write(highlight_log_line(line))
                 line_count += 1
         except JournalError as exc:
             if self._selected_source is source:
@@ -496,6 +591,7 @@ class ValhallogApp(App[None]):
         """Start a journalctl follow stream for the selected source."""
         if self.config is None:
             return
+        self.query_one("#splash", Static).styles.display = "none"
         self._stop_journal()
         self.query_one("#log-title", Static).update(source.name)
         self.query_one("#log-viewer", RichLog).clear()
@@ -529,7 +625,7 @@ class ValhallogApp(App[None]):
                     or self._selected_source is not source
                 ):
                     return
-                log_viewer.write(line)
+                log_viewer.write(highlight_log_line(line))
         except JournalError as exc:
             if self._selected_source is source and self._following:
                 self._following = False
@@ -594,7 +690,9 @@ class ValhallogApp(App[None]):
                 self._raw_lines = []
             self._raw_lines.append(line)
             if should_show(line, self._active_level):
-                self.query_one("#log-viewer", RichLog).write(line)
+                self.query_one("#log-viewer", RichLog).write(
+                    highlight_log_line(line)
+                )
 
     def _set_follow_error(self, path: Path, message: str) -> None:
         """Show a follow error only if the file is still selected."""
@@ -614,6 +712,12 @@ class ValhallogApp(App[None]):
             return
         self.push_screen(AddSourceScreen(resolve_user_home()), self._add_source)
 
+    def action_focus_level_select(self) -> None:
+        """Focus the log-level selector."""
+        level_select = self.query_one("#level-select", Select)
+        level_select.focus()
+        level_select.action_show_overlay()
+
     def action_focus_sources(self) -> None:
         """Focus the left sources panel."""
         self.query_one("#source-tree", Tree).focus()
@@ -622,11 +726,26 @@ class ValhallogApp(App[None]):
         """Focus the right log viewer panel."""
         self.query_one("#log-viewer", RichLog).focus()
 
-    def action_focus_level_select(self) -> None:
-        """Focus the log-level selector."""
-        level_select = self.query_one("#level-select", Select)
-        level_select.focus()
-        level_select.action_show_overlay()
+    def action_increase_source_panel(self) -> None:
+        """Widen the sources panel by one split step."""
+        self._set_source_panel_width(
+            self._source_width_percent + SOURCE_PANEL_STEP_PERCENT
+        )
+
+    def action_decrease_source_panel(self) -> None:
+        """Narrow the sources panel by one split step."""
+        self._set_source_panel_width(
+            self._source_width_percent - SOURCE_PANEL_STEP_PERCENT
+        )
+
+    def _set_source_panel_width(self, width_percent: int) -> None:
+        """Apply a bounded percentage width to the left panel."""
+        self._source_width_percent = max(
+            SOURCE_PANEL_MIN_PERCENT,
+            min(SOURCE_PANEL_MAX_PERCENT, width_percent),
+        )
+        source_pane = self.query_one("#source-pane", Vertical)
+        source_pane.styles.width = f"{self._source_width_percent}%"
 
     def _source_cursor(self) -> tuple[Tree, object] | None:
         """Return the source tree and its highlighted node, if any."""
@@ -654,6 +773,18 @@ class ValhallogApp(App[None]):
         source_tree.focus()
         source_tree.action_cursor_up()
 
+    def action_log_page_down(self) -> None:
+        """Scroll the log viewer down by one page when it has focus."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_page_down()
+
+    def action_log_page_up(self) -> None:
+        """Scroll the log viewer up by one page when it has focus."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_page_up()
+
     def action_source_collapse(self) -> None:
         """Collapse the highlighted source or its parent folder."""
         cursor = self._source_cursor()
@@ -678,6 +809,26 @@ class ValhallogApp(App[None]):
             node.expand()
         else:
             source_tree.select_node(node)
+
+    def action_vim_left(self) -> None:
+        """Scroll the log left or collapse the highlighted source tree node."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_scroll_left()
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        if source_tree.has_focus:
+            self.action_source_collapse()
+
+    def action_vim_right(self) -> None:
+        """Scroll the log right or expand/open the highlighted source node."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        if log_viewer.has_focus:
+            log_viewer.action_scroll_right()
+            return
+        source_tree = self.query_one("#source-tree", Tree)
+        if source_tree.has_focus:
+            self.action_source_expand_or_open()
 
     def _add_source(self, selection: AddSourceSelection | None) -> None:
         """Persist a confirmed picker selection and refresh the source tree."""

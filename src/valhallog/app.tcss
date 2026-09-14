@@ -7,13 +7,14 @@ Screen {
 }
 
 #controls {
-    height: 3;
+    height: 4;
     padding: 0 1;
     align: left middle;
 }
 
 #level-select {
     width: 18;
+    margin-bottom: 1;
 }
 
 #status {
@@ -26,12 +27,29 @@ Screen {
 }
 
 #source-pane {
-    width: 28;
+    width: 20%;
     border-right: solid $panel;
 }
 
 #log-pane {
     width: 1fr;
+    layers: content splash;
+}
+
+#log-title,
+#log-viewer {
+    layer: content;
+}
+
+#splash {
+    position: absolute;
+    layer: splash;
+    width: 100%;
+    height: 100%;
+    offset: 0 0;
+    content-align: center middle;
+    background: $surface;
+    color: $foreground 80%;
 }
 
 .pane-title {

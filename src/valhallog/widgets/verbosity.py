@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.widgets import Select
 from textual.widgets._select import SelectCurrent, SelectOverlay
 
 
 class VimSelectOverlay(SelectOverlay):
     """Allow j/k to move and l to confirm inside a Select menu."""
+
+    BINDINGS = [
+        Binding("j", "cursor_down", "Down"),
+        Binding("k", "cursor_up", "Up"),
+        Binding("l", "select", "Select"),
+    ]
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "j":
@@ -27,6 +34,11 @@ class VimSelectOverlay(SelectOverlay):
             event.stop()
             event.prevent_default()
             return
+        if event.key in {"H", "h"}:
+            self.action_dismiss()
+            event.stop()
+            event.prevent_default()
+            return
         await super()._on_key(event)
 
 
@@ -35,7 +47,7 @@ class VerbositySelectCurrent(SelectCurrent):
 
     def update(self, label) -> None:
         if isinstance(label, str) and label is not Select.NULL:
-            label = f"(V)ERBOSITY {label}"
+            label = f"\\[v] {label}"
         super().update(label)
 
 

@@ -24,12 +24,16 @@ Start the app either way:
 .venv/bin/python -m valhallog
 ```
 
-Press `q` to quit, `Tab` to move focus, `Shift+H` / `Shift+L` to focus the
-sources or log viewer panels, `v` to focus the `(V)ERBOSITY` menu, `j` / `k`
-to move through the source tree or scroll the log viewer,
-`h` / `l` to collapse or expand/open, `f` to toggle follow mode for the
-selected source, `a` to add a folder source, `r` to rename the highlighted
-source, and `?` to open the help screen.
+Press `q` to quit and `Tab` to move focus between panels. `Shift+H` and
+`Shift+L` focus the sources and log viewer panels. In the sources panel,
+`j` / `k` move through entries and `h` collapses while `l` expands or opens.
+In the log viewer, `j` / `k` scroll vertically, `Shift+J` / `Shift+K` scroll
+by one page, and `h` / `l` scroll horizontally. Press `v` to focus and open
+the `(V)ERBOSITY` menu,
+`f` to toggle follow mode, `+` / `=` to widen and `-` to narrow the sources
+panel, `a` to add a folder source, `r` to rename the highlighted source, and
+`?` to open the help screen. The sources panel starts at 20% of the window
+width.
 The add-source picker starts in the invoking user's home directory, shows
 hidden folders, offers a name input after selection, and offers recursive
 scanning. Use the level selector to filter the selected source.
@@ -64,6 +68,8 @@ highlighted configured source and saves that change immediately.
 Regular-file reads run in the background so the interface remains responsive.
 Plain-file filtering uses level tokens such as `DEBUG`, `INFO`, `WARN`,
 `ERROR`, and `CRITICAL`; journal filtering uses native journal priorities.
+The viewer highlights recognized severity tokens and common ISO, time-only,
+and syslog timestamps while leaving the rest of each log message unchanged.
 Journal follow mode uses `journalctl --follow` and is limited to the most recent
 2,000 viewer lines.
 

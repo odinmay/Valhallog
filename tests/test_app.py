@@ -2,9 +2,20 @@ from pathlib import Path
 
 from textual.widgets import Footer, Header, RichLog, Select, Static, Tree
 
-from valhallog.app import HelpScreen, ValhallogApp
+from valhallog.app import HelpScreen, ValhallogApp, _VALKNUT_BASE, _valknut_splash
 from valhallog.config import ConfigError
 from valhallog.models import AppConfig, SourceConfig, ViewerConfig
+
+
+def test_valknut_splash_preserves_artwork_spacing() -> None:
+    base_lines = _VALKNUT_BASE.strip("\n").splitlines()
+    base_width = max(map(len, base_lines))
+
+    rendered_lines = _valknut_splash(0, 0).splitlines()
+
+    assert rendered_lines == [
+        line.ljust(base_width) for line in base_lines
+    ]
 
 
 def test_app_renders_hello_screen(monkeypatch) -> None:
@@ -21,10 +32,12 @@ def test_app_renders_hello_screen(monkeypatch) -> None:
             assert app.query_one("#source-tree", Tree)
             assert app.query_one("#log-viewer", RichLog)
             assert app.query_one("#level-select", Select).value == "all"
-            assert "(V)ERBOSITY All" in str(
+            assert "[v] All" in str(
                 app.query_one("#level-select #label", Static).render()
             )
-            assert "Hello Valhallog" in str(app.query_one("#log-viewer", RichLog).lines[0])
+            splash = app.query_one("#splash", Static)
+            assert "___      ___" in str(splash.render())
+            assert splash.styles.display == "block"
             assert app.query_one("#source-tree", Tree).root.children
 
             focused_before_tab = app.focused
@@ -74,6 +87,7 @@ def test_app_displays_configured_sources(monkeypatch, tmp_path: Path) -> None:
             source_tree.select_node(source_tree.root.children[0].children[0])
             await pilot.pause()
             log_viewer = app.query_one("#log-viewer", RichLog)
+            assert app.query_one("#splash", Static).styles.display == "none"
             assert [line.text for line in log_viewer.lines] == ["ERROR: example"]
             assert str(app.query_one("#log-title", Static).render()) == "example.log"
             assert "Loaded 1 of 1 line" in str(
@@ -268,7 +282,10 @@ def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None
         ),
     )
     scroll_calls: list[str] = []
+    page_calls: list[str] = []
+    horizontal_calls: list[str] = []
     source_calls: list[str] = []
+    tree_panel_calls: list[str] = []
 
     def record_scroll_up(self) -> None:
         scroll_calls.append("up")
@@ -276,16 +293,40 @@ def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None
     def record_scroll_down(self) -> None:
         scroll_calls.append("down")
 
+    def record_scroll_left(self) -> None:
+        horizontal_calls.append("left")
+
+    def record_scroll_right(self) -> None:
+        horizontal_calls.append("right")
+
+    def record_page_up(self) -> None:
+        page_calls.append("up")
+
+    def record_page_down(self) -> None:
+        page_calls.append("down")
+
     def record_source_up(self) -> None:
         source_calls.append("up")
 
     def record_source_down(self) -> None:
         source_calls.append("down")
 
+    def record_tree_collapse(self) -> None:
+        tree_panel_calls.append("collapse")
+
+    def record_tree_expand(self) -> None:
+        tree_panel_calls.append("expand")
+
     monkeypatch.setattr(RichLog, "action_scroll_up", record_scroll_up)
     monkeypatch.setattr(RichLog, "action_scroll_down", record_scroll_down)
+    monkeypatch.setattr(RichLog, "action_scroll_left", record_scroll_left)
+    monkeypatch.setattr(RichLog, "action_scroll_right", record_scroll_right)
+    monkeypatch.setattr(RichLog, "action_page_up", record_page_up)
+    monkeypatch.setattr(RichLog, "action_page_down", record_page_down)
     monkeypatch.setattr(Tree, "action_cursor_up", record_source_up)
     monkeypatch.setattr(Tree, "action_cursor_down", record_source_down)
+    monkeypatch.setattr(ValhallogApp, "action_source_collapse", record_tree_collapse)
+    monkeypatch.setattr(ValhallogApp, "action_source_expand_or_open", record_tree_expand)
     app = ValhallogApp()
 
     async def run_test() -> None:
@@ -296,8 +337,30 @@ def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None
             assert app.focused is source_tree
             await pilot.press("L")
             assert app.focused is log_viewer
+
+            source_tree.focus()
+            await pilot.press("h", "l")
+            assert tree_panel_calls == ["collapse", "expand"]
+
             await pilot.press("v")
             level_select = app.query_one("#level-select", Select)
+            assert app.focused is level_select.query_one("SelectOverlay")
+            await pilot.pause()
+            footer = app.query_one(Footer)
+            footer_actions = {
+                child.action for child in footer.query("FooterKey")
+            }
+            assert {"cursor_down", "cursor_up", "select", "dismiss"} <= footer_actions
+            assert "increase_source_panel" not in footer_actions
+            assert "decrease_source_panel" not in footer_actions
+            assert "command_palette" not in footer_actions
+            await pilot.press("h")
+            await pilot.pause()
+            assert level_select.expanded is False
+            assert app.focused is level_select
+
+            await pilot.press("v")
+            await pilot.pause()
             assert app.focused is level_select.query_one("SelectOverlay")
             await pilot.press("j")
             assert level_select.query_one("SelectOverlay").highlighted == 1
@@ -309,13 +372,41 @@ def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None
             assert level_select.expanded is False
 
             log_viewer.focus()
+            await pilot.pause()
+            footer_actions = {
+                child.action for child in footer.query("FooterKey")
+            }
+            assert "add_source" not in footer_actions
+            assert "rename_source" not in footer_actions
+            assert "log_page_up" in footer_actions
+            assert "log_page_down" in footer_actions
             await pilot.press("k", "j")
             assert scroll_calls == ["up", "down"]
             assert source_calls == []
+            await pilot.press("h", "l")
+            assert horizontal_calls == ["left", "right"]
+            await pilot.press("K", "J")
+            assert page_calls == ["up", "down"]
 
             source_tree.focus()
+            await pilot.pause()
+            footer_actions = {
+                child.action for child in footer.query("FooterKey")
+            }
+            assert "log_page_up" not in footer_actions
+            assert "log_page_down" not in footer_actions
+            assert "add_source" in footer_actions
+            assert "rename_source" in footer_actions
             await pilot.press("k", "j")
             assert source_calls == ["up", "down"]
+            await pilot.press("K", "J")
+            assert page_calls == ["up", "down"]
+            await pilot.press("+")
+            assert app._source_width_percent == 25
+            await pilot.press("=")
+            assert app._source_width_percent == 30
+            await pilot.press("-")
+            assert app._source_width_percent == 25
             await pilot.press("q")
 
     asyncio.run(run_test())
