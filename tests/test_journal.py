@@ -1,9 +1,11 @@
 import asyncio
+from datetime import date, time, timezone
 
 import pytest
 
 from valhallog.models import SourceConfig
 from valhallog.sources.journal import JournalError, JournalReader, journalctl_args
+from valhallog.time_filters import TimeWindow
 
 
 @pytest.mark.parametrize(
@@ -47,6 +49,35 @@ def test_journal_reader_builds_follow_command() -> None:
         "--lines",
         "10",
         "--follow",
+    ]
+
+
+def test_journalctl_args_add_inclusive_time_window() -> None:
+    source = SourceConfig(name="System journal", type="journal", mode="system")
+    window = TimeWindow.from_values(
+        date(2026, 9, 14), time(17, tzinfo=timezone.utc), 5
+    )
+
+    args = journalctl_args(source, time_window=window)
+
+    assert "--since=2026-09-14T16:55:00+00:00" in args
+    assert "--until=2026-09-14T17:05:00+00:00" in args
+
+
+def test_journal_reader_uses_all_lines_for_a_time_window() -> None:
+    source = SourceConfig(name="Current boot", type="journal", mode="boot")
+    window = TimeWindow.from_values(
+        date(2026, 9, 14), time(17, tzinfo=timezone.utc), 5
+    )
+
+    assert JournalReader(source).command(None, time_window=window) == [
+        "journalctl",
+        "--no-pager",
+        "--output=short-iso",
+        "--boot",
+        "--since=2026-09-14T16:55:00+00:00",
+        "--until=2026-09-14T17:05:00+00:00",
+        "--lines=all",
     ]
 
 

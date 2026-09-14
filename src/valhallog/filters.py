@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+from .time_filters import TimeWindow
 
 LEVELS = ("all", "debug", "info", "warning", "error", "critical")
 _LEVEL_RANK = {level: rank for rank, level in enumerate(LEVELS)}
@@ -42,12 +43,23 @@ def classify_token(token: str) -> str | None:
     return None
 
 
-def should_show(line: str, minimum_level: str) -> bool:
+def should_show(
+    line: str,
+    minimum_level: str,
+    time_window: TimeWindow | None = None,
+) -> bool:
     """Return whether a line meets the selected minimum severity."""
     level = normalize_level(minimum_level)
-    return level == "all" or _LEVEL_RANK[classify_line(line)] >= _LEVEL_RANK[level]
+    return (
+        (level == "all" or _LEVEL_RANK[classify_line(line)] >= _LEVEL_RANK[level])
+        and (time_window is None or time_window.matches_line(line))
+    )
 
 
-def filter_lines(lines: Iterable[str], minimum_level: str) -> list[str]:
+def filter_lines(
+    lines: Iterable[str],
+    minimum_level: str,
+    time_window: TimeWindow | None = None,
+) -> list[str]:
     """Return lines that meet a plain-file severity filter."""
-    return [line for line in lines if should_show(line, minimum_level)]
+    return [line for line in lines if should_show(line, minimum_level, time_window)]

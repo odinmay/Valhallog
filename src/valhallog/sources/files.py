@@ -17,9 +17,9 @@ class FileLogReader:
     def __init__(self, path: Path):
         self.path = Path(path)
 
-    def read_recent_lines(self, max_lines: int) -> list[str]:
-        """Read sequentially while keeping only the requested tail."""
-        if max_lines <= 0:
+    def read_recent_lines(self, max_lines: int | None) -> list[str]:
+        """Read lines, optionally keeping only the requested tail."""
+        if max_lines is not None and max_lines <= 0:
             raise ValueError("max_lines must be positive")
 
         lines: deque[str] = deque(maxlen=max_lines)

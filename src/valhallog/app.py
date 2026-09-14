@@ -1,7 +1,8 @@
 """The runnable Valhallog application."""
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time
 from pathlib import Path
 from threading import Thread
 
@@ -11,7 +12,16 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, RichLog, Select, Static, Tree
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    RichLog,
+    Select,
+    Static,
+    Tree,
+)
 from textual.worker import Worker, WorkerState, get_current_worker
 
 from .config import ConfigError, load_config, resolve_user_home
@@ -25,6 +35,7 @@ from .highlighting import highlight_log_line
 from .models import AppConfig, SourceConfig
 from .sources.files import FileLogReader, scan_directory
 from .sources.journal import JournalError, JournalReader
+from .time_filters import TimeWindow
 from .widgets.source_picker import (
     AddSourceScreen,
     AddSourceSelection,
@@ -33,7 +44,6 @@ from .widgets.source_picker import (
 from .widgets.verbosity import VimVerbositySelect
 
 
-VIEWER_HISTORY_LIMIT = 2000
 SOURCE_PANEL_DEFAULT_PERCENT = 20
 SOURCE_PANEL_MIN_PERCENT = 15
 SOURCE_PANEL_MAX_PERCENT = 60
@@ -93,6 +103,7 @@ class HelpScreen(ModalScreen[None]):
                 "a  Add a folder source\n"
                 "r  Rename the highlighted source\n"
                 "v  Focus verbosity menu\n"
+                "Time  Open the time-window menu\n"
                 "j/k  Move through sources or scroll logs\n"
                 "Shift+J/K  Page through logs\n"
                 "Shift+H  Focus sources\n"
@@ -104,7 +115,8 @@ class HelpScreen(ModalScreen[None]):
                 "?  Open this help\n"
                 "Escape  Close this help\n\n"
                 "Choose a source from the tree. Use the level selector to filter\n"
-                "plain files or set the native journal priority.\n\n"
+                "plain files or set the native journal priority. Use the time menu\n"
+                "to filter both source types by an inclusive timestamp window.\n\n"
                 f"Config: {config_text}",
                 id="help-content",
             ),
@@ -122,6 +134,168 @@ class HelpScreen(ModalScreen[None]):
             self.dismiss()
 
 
+@dataclass(frozen=True)
+class TimeFilterSelection:
+    """The result returned by the time-filter menu."""
+
+    window: TimeWindow | None
+
+
+class TimeFilterScreen(ModalScreen[TimeFilterSelection | None]):
+    """Edit the inclusive time window used by the log viewer."""
+
+    BINDINGS = [
+        Binding("J", "decrease_window", "Decrease minutes", show=False),
+        Binding("K", "increase_window", "Increase minutes", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, active_window: TimeWindow | None):
+        super().__init__()
+        if active_window is None:
+            now = datetime.now().astimezone().replace(second=0, microsecond=0)
+            self._center = now
+            self._minutes = 5
+        else:
+            self._center = active_window.center
+            self._minutes = active_window.minutes
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Time filter", id="time-filter-title"),
+            Static(
+                "Select a center date and time. J/K and the buttons adjust the ± window.",
+                id="time-filter-instructions",
+            ),
+            Horizontal(
+                Static("Date"),
+                TimeFilterInput(self._center.strftime("%Y-%m-%d"), id="time-date"),
+                id="time-date-row",
+            ),
+            Horizontal(
+                Static("Time"),
+                TimeFilterInput(self._center.strftime("%H:%M:%S"), id="time-of-day"),
+                id="time-of-day-row",
+            ),
+            Horizontal(
+                Static("Window (minutes)"),
+                Button("−", id="time-minus", compact=True),
+                TimeFilterInput(str(self._minutes), id="time-window"),
+                Button("+", id="time-plus", compact=True),
+                id="time-window-controls",
+            ),
+            Static("", id="time-filter-error"),
+            Horizontal(
+                Button("Apply", id="time-apply", variant="primary"),
+                Button("Clear", id="time-clear"),
+                Button("Cancel", id="time-cancel"),
+                id="time-filter-actions",
+            ),
+            id="time-filter-dialog",
+        )
+
+    def _adjust_window(self, amount: int) -> None:
+        window_input = self.query_one("#time-window", Input)
+        try:
+            minutes = int(window_input.value)
+        except ValueError:
+            minutes = self._minutes
+        self._minutes = max(0, min(1440, minutes + amount))
+        window_input.value = str(self._minutes)
+        self.query_one("#time-filter-error", Static).update("")
+
+    def action_decrease_window(self) -> None:
+        """Decrease the window while this menu is open."""
+        self._adjust_window(-1)
+
+    def action_increase_window(self) -> None:
+        """Increase the window while this menu is open."""
+        self._adjust_window(1)
+
+    def _parse_window(self) -> TimeWindow | None:
+        date_text = self.query_one("#time-date", Input).value.strip()
+        time_text = self.query_one("#time-of-day", Input).value.strip()
+        minutes_text = self.query_one("#time-window", Input).value.strip()
+        try:
+            selected_date = date.fromisoformat(date_text)
+            try:
+                selected_time = time.fromisoformat(time_text)
+            except ValueError:
+                selected_time = datetime.strptime(time_text, "%H:%M").time()
+            minutes = int(minutes_text)
+        except ValueError:
+            self.query_one("#time-filter-error", Static).update(
+                "Use a valid date, time, and non-negative minute value."
+            )
+            return None
+        if minutes < 0 or minutes > 1440:
+            self.query_one("#time-filter-error", Static).update(
+                "Window must be between 0 and 1440 minutes."
+            )
+            return None
+        return TimeWindow.from_values(selected_date, selected_time, minutes)
+
+    def action_apply(self) -> None:
+        """Validate and apply the entered time window."""
+        window = self._parse_window()
+        if window is not None:
+            self.dismiss(TimeFilterSelection(window))
+
+    def action_clear(self) -> None:
+        """Clear the active time filter."""
+        self.dismiss(TimeFilterSelection(None))
+
+    def action_cancel(self) -> None:
+        """Close the menu without changing the active filter."""
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle the physical time-filter controls."""
+        actions = {
+            "time-minus": self.action_decrease_window,
+            "time-plus": self.action_increase_window,
+            "time-apply": self.action_apply,
+            "time-clear": self.action_clear,
+            "time-cancel": self.action_cancel,
+        }
+        action = actions.get(event.button.id)
+        if action is not None:
+            action()
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        """Allow Enter to apply the menu from any input."""
+        self.action_apply()
+
+    def on_key(self, event: events.Key) -> None:
+        """Keep shifted J/K active even when an input has focus."""
+        if event.key in {"J", "j"}:
+            self.action_decrease_window()
+            event.stop()
+            event.prevent_default()
+        elif event.key in {"K", "k"}:
+            self.action_increase_window()
+            event.stop()
+            event.prevent_default()
+
+
+class TimeFilterInput(Input):
+    """An input that keeps the modal's J/K controls active while focused."""
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"J", "j"}:
+            screen = self.screen
+            if isinstance(screen, TimeFilterScreen):
+                screen.action_decrease_window()
+                event.stop()
+                event.prevent_default()
+        elif event.key in {"K", "k"}:
+            screen = self.screen
+            if isinstance(screen, TimeFilterScreen):
+                screen.action_increase_window()
+                event.stop()
+                event.prevent_default()
+
+
 class ValhallogApp(App[None]):
     """A minimal Textual app shell for Valhallog."""
 
@@ -131,6 +305,7 @@ class ValhallogApp(App[None]):
     _selected_path: Path | None = None
     _selected_source: SourceConfig | None = None
     _active_level = "all"
+    _active_time_window: TimeWindow | None = None
     _raw_lines: list[str] | None = None
     _following = False
     _follow_worker: Worker[None] | None = None
@@ -225,6 +400,7 @@ class ValhallogApp(App[None]):
                     allow_blank=False,
                     id="level-select",
                 ),
+                Button("Time: off", id="time-filter"),
                 Static("Source: none | Level: ALL", id="status"),
                 id="controls",
             ),
@@ -241,7 +417,7 @@ class ValhallogApp(App[None]):
                         id="log-viewer",
                         highlight=False,
                         markup=False,
-                        max_lines=VIEWER_HISTORY_LIMIT,
+                        max_lines=None,
                     ),
                     id="log-pane",
                 ),
@@ -257,6 +433,7 @@ class ValhallogApp(App[None]):
         self._selected_path = None
         self._selected_source = None
         self._active_level = "all"
+        self._active_time_window = None
         self._raw_lines = None
         self._following = False
         self._follow_worker = None
@@ -278,6 +455,7 @@ class ValhallogApp(App[None]):
             self._refresh_source_tree()
 
         self.query_one("#splash", ValknutSplash).styles.display = "block"
+        self._update_time_filter_button()
 
     def _refresh_source_tree(self) -> None:
         """Rebuild the source tree after loading or adding a source."""
@@ -343,7 +521,7 @@ class ValhallogApp(App[None]):
         if isinstance(event.node.data, Path):
             self._selected_path = event.node.data
             self._selected_source = None
-            self._start_file_load(event.node.data, config.viewer.initial_lines)
+            self._start_file_load(event.node.data)
         elif isinstance(event.node.data, SourceConfig) and event.node.data.type == "journal":
             self._selected_path = None
             self._selected_source = event.node.data
@@ -359,7 +537,7 @@ class ValhallogApp(App[None]):
             self._selected_path = None
             self._selected_source = None
 
-    def _start_file_load(self, path: Path, max_lines: int) -> None:
+    def _start_file_load(self, path: Path) -> None:
         """Start a background read for the selected file."""
         self.query_one("#splash", Static).styles.display = "none"
         log_viewer = self.query_one("#log-viewer", RichLog)
@@ -367,17 +545,17 @@ class ValhallogApp(App[None]):
         status = self.query_one("#status", Static)
         log_title.update(path.name)
         log_viewer.clear()
-        status.update(f"Loading {path}...")
+        status.update(f"Loading {path}... | {self._filter_summary()}")
         self._raw_lines = []
         self._file_worker = self.run_worker(
-            self._read_file_worker(path, max_lines),
+            self._read_file_worker(path),
             name="load-file",
             group="file-reader",
             exclusive=True,
             exit_on_error=False,
         )
 
-    async def _read_file_worker(self, path: Path, max_lines: int) -> list[str]:
+    async def _read_file_worker(self, path: Path) -> list[str]:
         """Read a file off the UI loop and return its lines to the worker."""
         loop = asyncio.get_running_loop()
         result: asyncio.Future[list[str]] = loop.create_future()
@@ -391,7 +569,7 @@ class ValhallogApp(App[None]):
 
         def read_file() -> None:
             try:
-                lines = FileLogReader(path).read_recent_lines(max_lines)
+                lines = FileLogReader(path).read_recent_lines(None)
             except Exception as error:
                 publish(
                     lambda error=error: not result.done()
@@ -439,14 +617,18 @@ class ValhallogApp(App[None]):
         """Render the cached file lines using the active severity filter."""
         if self._selected_path is None or self._raw_lines is None:
             return
-        visible_lines = filter_lines(self._raw_lines, self._active_level)
+        visible_lines = filter_lines(
+            self._raw_lines,
+            self._active_level,
+            self._active_time_window,
+        )
         log_viewer = self.query_one("#log-viewer", RichLog)
         log_viewer.clear()
         for line in visible_lines:
             log_viewer.write(highlight_log_line(line))
         self.query_one("#status", Static).update(
             f"Loaded {len(visible_lines)} of {len(self._raw_lines)} line(s) from "
-            f"{self._selected_path} | Filter: {self._active_level.upper()}"
+            f"{self._selected_path} | {self._filter_summary()}"
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -465,6 +647,55 @@ class ValhallogApp(App[None]):
                 self._stop_journal()
                 self._start_journal_load(source, self.config.viewer.initial_lines)
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Open the time-filter menu from the top-bar button."""
+        if event.button.id == "time-filter":
+            self.push_screen(
+                TimeFilterScreen(self._active_time_window),
+                self._apply_time_filter_selection,
+            )
+
+    def _apply_time_filter_selection(
+        self, selection: TimeFilterSelection | None
+    ) -> None:
+        """Apply or clear a time filter after the modal closes."""
+        if selection is None:
+            return
+        self._active_time_window = selection.window
+        self._update_time_filter_button()
+        if self._selected_path is not None and self._raw_lines is not None:
+            self._render_file_lines()
+        elif self._selected_source is not None and self.config is not None:
+            source = self._selected_source
+            if self._following:
+                self._stop_follow()
+                self._start_journal_follow(source)
+            else:
+                self._stop_journal()
+                self._start_journal_load(source, self.config.viewer.initial_lines)
+        else:
+            self.query_one("#status", Static).update(
+                f"No source selected | {self._filter_summary()}"
+            )
+
+    def _filter_summary(self) -> str:
+        """Return the active filter state for status messages."""
+        summary = f"Filter: {self._active_level.upper()}"
+        if self._active_time_window is not None:
+            summary += f" | Time: {self._active_time_window.label()}"
+        return summary
+
+    def _update_time_filter_button(self) -> None:
+        """Keep the top-bar button label synchronized with the active filter."""
+        try:
+            button = self.query_one("#time-filter", Button)
+        except NoMatches:
+            return
+        if self._active_time_window is None:
+            button.label = "Time: off"
+        else:
+            button.label = f"Time: ±{self._active_time_window.minutes}m"
+
     def _start_journal_load(self, source: SourceConfig, max_lines: int) -> None:
         """Clear the viewer and start reading a virtual journal source."""
         self.query_one("#splash", Static).styles.display = "none"
@@ -472,10 +703,15 @@ class ValhallogApp(App[None]):
         self.query_one("#log-viewer", RichLog).clear()
         self._raw_lines = None
         self.query_one("#status", Static).update(
-            f"Loading {source.name} | Filter: {self._active_level.upper()}..."
+            f"Loading {source.name} | {self._filter_summary()}..."
         )
         self._journal_worker = self.run_worker(
-            self._load_journal(source, max_lines, self._active_level),
+            self._load_journal(
+                source,
+                max_lines,
+                self._active_level,
+                self._active_time_window,
+            ),
             name="load-journal",
             group="journal-reader",
             exclusive=True,
@@ -483,14 +719,23 @@ class ValhallogApp(App[None]):
         )
 
     async def _load_journal(
-        self, source: SourceConfig, max_lines: int, level: str
+        self,
+        source: SourceConfig,
+        max_lines: int,
+        level: str,
+        time_window: TimeWindow | None,
     ) -> None:
         """Stream journal output into the viewer while the source is selected."""
         log_viewer = self.query_one("#log-viewer", RichLog)
         status = self.query_one("#status", Static)
         line_count = 0
         try:
-            async for line in JournalReader(source).iter_lines(max_lines, level):
+            reader = JournalReader(source)
+            if time_window is None:
+                lines = reader.iter_lines(max_lines, level)
+            else:
+                lines = reader.iter_lines(None, level, time_window=time_window)
+            async for line in lines:
                 if self._selected_source is not source:
                     return
                 log_viewer.write(highlight_log_line(line))
@@ -507,7 +752,7 @@ class ValhallogApp(App[None]):
         if self._selected_source is source:
             status.update(
                 f"Loaded {line_count} journal line(s) from {source.name} | "
-                f"Filter: {level.upper()}"
+                f"{self._filter_summary()}"
             )
 
     def action_toggle_follow(self) -> None:
@@ -518,12 +763,12 @@ class ValhallogApp(App[None]):
             if self._following:
                 self._stop_follow()
                 status.update(
-                    f"Follow: OFF | Filter: {self._active_level.upper()} | {source.name}"
+                    f"Follow: OFF | {self._filter_summary()} | {source.name}"
                 )
             else:
                 self._start_journal_follow(source)
                 status.update(
-                    f"Follow: ON | Filter: {self._active_level.upper()} | {source.name}"
+                    f"Follow: ON | {self._filter_summary()} | {source.name}"
                 )
             return
         if self._selected_path is None or self.config is None:
@@ -533,7 +778,7 @@ class ValhallogApp(App[None]):
         if self._following:
             self._stop_follow()
             status.update(
-                f"Follow: OFF | Filter: {self._active_level.upper()} | "
+                f"Follow: OFF | {self._filter_summary()} | "
                 f"{self._selected_path}"
             )
             return
@@ -553,7 +798,7 @@ class ValhallogApp(App[None]):
             exit_on_error=False,
         )
         status.update(
-            f"Follow: ON | Filter: {self._active_level.upper()} | {self._selected_path}"
+            f"Follow: ON | {self._filter_summary()} | {self._selected_path}"
         )
 
     def _stop_follow(self) -> None:
@@ -601,6 +846,7 @@ class ValhallogApp(App[None]):
                 source,
                 self.config.viewer.initial_lines,
                 self._active_level,
+                self._active_time_window,
             ),
             name="follow-journal",
             group="journal-follow",
@@ -609,16 +855,25 @@ class ValhallogApp(App[None]):
         )
 
     async def _follow_journal(
-        self, source: SourceConfig, max_lines: int, level: str
+        self,
+        source: SourceConfig,
+        max_lines: int,
+        level: str,
+        time_window: TimeWindow | None,
     ) -> None:
         """Stream journalctl follow output until the worker is cancelled."""
         worker = get_current_worker()
         log_viewer = self.query_one("#log-viewer", RichLog)
         status = self.query_one("#status", Static)
         try:
-            async for line in JournalReader(source).iter_lines(
-                max_lines, level, follow=True
-            ):
+            reader = JournalReader(source)
+            if time_window is None:
+                lines = reader.iter_lines(max_lines, level, follow=True)
+            else:
+                lines = reader.iter_lines(
+                    None, level, follow=True, time_window=time_window
+                )
+            async for line in lines:
                 if (
                     worker.is_cancelled
                     or not self._following
@@ -689,7 +944,7 @@ class ValhallogApp(App[None]):
             if self._raw_lines is None:
                 self._raw_lines = []
             self._raw_lines.append(line)
-            if should_show(line, self._active_level):
+            if should_show(line, self._active_level, self._active_time_window):
                 self.query_one("#log-viewer", RichLog).write(
                     highlight_log_line(line)
                 )

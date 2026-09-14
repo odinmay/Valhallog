@@ -3,8 +3,8 @@
 Valhallog is a keyboard-friendly Textual app for browsing Linux logs. The
 current milestone provides a source tree on the left, a log viewer on the
 right, a level selector, a status line, and a footer. Directory sources are
-scanned for safe text-like files, selecting one loads its recent lines, and
-journal sources read recent output from `journalctl`.
+scanned for safe text-like files, selecting one loads the complete text file,
+and journal sources read recent output from `journalctl`.
 
 ## Run it
 
@@ -70,12 +70,18 @@ Plain-file filtering uses level tokens such as `DEBUG`, `INFO`, `WARN`,
 `ERROR`, and `CRITICAL`; journal filtering uses native journal priorities.
 The viewer highlights recognized severity tokens and common ISO, time-only,
 and syslog timestamps while leaving the rest of each log message unchanged.
-Journal follow mode uses `journalctl --follow` and is limited to the most recent
-2,000 viewer lines.
+Use the `Time` button beside the level selector to choose an editable date,
+center time, and inclusive ±minute window. The default date is today and the
+default window is ±5 minutes. `J` and `K` adjust the window only while that
+menu is open. Time filtering applies to regular files and journal sources;
+timestamps with an explicit offset use that offset, while timestamps without
+one use the machine's local timezone. Regular files are read in full so a
+time filter can find older entries.
 
 ## Current limitations
 
 - Existing sources can still be edited directly in TOML; new folder sources
   can also be added from inside the app with `a`.
 - Plain-file severity filtering is a token-based convenience heuristic.
-- Search, saved views, and advanced journal filters are not included yet.
+- Lines without a recognized timestamp are hidden while a time filter is active.
+- Search and saved views are not included yet.

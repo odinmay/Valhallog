@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 from ..filters import normalize_level
 from ..models import SourceConfig
+from ..time_filters import TimeWindow
 
 
 JOURNALCTL = "journalctl"
@@ -31,7 +32,11 @@ class JournalError(RuntimeError):
     """A journal command could not produce a usable result."""
 
 
-def journalctl_args(source: SourceConfig, level: str = "all") -> list[str]:
+def journalctl_args(
+    source: SourceConfig,
+    level: str = "all",
+    time_window: TimeWindow | None = None,
+) -> list[str]:
     """Return the safe, shell-free ``journalctl`` arguments for a source."""
     if source.type != "journal":
         raise ValueError("journalctl_args requires a journal source")
@@ -48,6 +53,13 @@ def journalctl_args(source: SourceConfig, level: str = "all") -> list[str]:
             name for name, rank in _LEVEL_RANK.items() if rank == threshold
         )
         args.append(f"--priority={_JOURNAL_PRIORITIES[selected]}..emerg")
+    if time_window is not None:
+        args.extend(
+            [
+                f"--since={time_window.start.isoformat()}",
+                f"--until={time_window.end.isoformat()}",
+            ]
+        )
     return args
 
 
@@ -58,26 +70,38 @@ class JournalReader:
         self.source = source
 
     def command(
-        self, max_lines: int, level: str = "all", follow: bool = False
+        self,
+        max_lines: int | None,
+        level: str = "all",
+        follow: bool = False,
+        time_window: TimeWindow | None = None,
     ) -> list[str]:
         """Build a bounded command for the configured source."""
-        if max_lines <= 0:
+        if max_lines is not None and max_lines <= 0:
             raise ValueError("max_lines must be positive")
         command = [
-            *journalctl_args(self.source, level),
-            "--lines",
-            str(max_lines),
+            *journalctl_args(self.source, level, time_window),
         ]
+        if time_window is None:
+            if max_lines is None:
+                raise ValueError("max_lines is required without a time window")
+            command.extend(["--lines", str(max_lines)])
+        else:
+            command.append("--lines=all")
         if follow:
             command.append("--follow")
         return command
 
     async def iter_lines(
-        self, max_lines: int, level: str = "all", follow: bool = False
+        self,
+        max_lines: int | None,
+        level: str = "all",
+        follow: bool = False,
+        time_window: TimeWindow | None = None,
     ) -> AsyncIterator[str]:
         """Yield decoded journal lines as ``journalctl`` writes them."""
         process = await asyncio.create_subprocess_exec(
-            *self.command(max_lines, level, follow),
+            *self.command(max_lines, level, follow, time_window),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -101,7 +125,16 @@ class JournalReader:
             raise
 
     async def read_lines(
-        self, max_lines: int, level: str = "all", follow: bool = False
+        self,
+        max_lines: int | None,
+        level: str = "all",
+        follow: bool = False,
+        time_window: TimeWindow | None = None,
     ) -> list[str]:
         """Collect recent lines for callers that do not need streaming."""
-        return [line async for line in self.iter_lines(max_lines, level, follow)]
+        return [
+            line
+            async for line in self.iter_lines(
+                max_lines, level, follow, time_window
+            )
+        ]

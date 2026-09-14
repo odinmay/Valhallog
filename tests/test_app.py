@@ -1,8 +1,14 @@
 from pathlib import Path
 
-from textual.widgets import Footer, Header, RichLog, Select, Static, Tree
+from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Static, Tree
 
-from valhallog.app import HelpScreen, ValhallogApp, _VALKNUT_BASE, _valknut_splash
+from valhallog.app import (
+    HelpScreen,
+    TimeFilterScreen,
+    ValhallogApp,
+    _VALKNUT_BASE,
+    _valknut_splash,
+)
 from valhallog.config import ConfigError
 from valhallog.models import AppConfig, SourceConfig, ViewerConfig
 
@@ -133,6 +139,100 @@ def test_app_displays_configured_sources(monkeypatch, tmp_path: Path) -> None:
             await pilot.press("q")
 
     import asyncio
+
+    asyncio.run(run_test())
+
+
+def test_time_filter_menu_adjusts_and_clears_window(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(),
+            sources=(),
+        ),
+    )
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            await pilot.click("#time-filter")
+            assert isinstance(app.screen, TimeFilterScreen)
+            window_input = app.screen.query_one("#time-window", Input)
+            assert window_input.value == "5"
+
+            await pilot.press("J")
+            assert window_input.value == "4"
+            await pilot.press("K")
+            assert window_input.value == "5"
+            await pilot.click("#time-plus")
+            assert window_input.value == "6"
+
+            app.screen.query_one("#time-date", Input).value = "2026-09-14"
+            app.screen.query_one("#time-of-day", Input).value = "17:00:00"
+            await pilot.click("#time-apply")
+            assert app._active_time_window is not None
+            assert app._active_time_window.minutes == 6
+            assert str(app.query_one("#time-filter", Button).label) == "Time: ±6m"
+
+            await pilot.click("#time-filter")
+            await pilot.click("#time-clear")
+            assert app._active_time_window is None
+            await pilot.press("q")
+
+    asyncio.run(run_test())
+
+
+def test_time_filter_renders_full_file_and_restores_it_on_clear(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    logs_path = tmp_path / "logs"
+    logs_path.mkdir()
+    log_path = logs_path / "example.log"
+    log_path.write_text(
+        "2026-09-14T16:54:59 INFO: before\n"
+        "2026-09-14T16:55:00 INFO: start\n"
+        "2026-09-14T17:00:00 INFO: center\n"
+        "2026-09-14T17:05:00 INFO: end\n"
+        "2026-09-14T17:05:01 INFO: after\n"
+        "plain text without a timestamp\n"
+    )
+    monkeypatch.setattr(
+        "valhallog.app.load_config",
+        lambda: AppConfig(
+            config_path=tmp_path / "config.toml",
+            viewer=ViewerConfig(initial_lines=1),
+            sources=(SourceConfig(name="Logs", type="directory", path=logs_path),),
+        ),
+    )
+    app = ValhallogApp()
+
+    async def run_test() -> None:
+        async with app.run_test() as pilot:
+            source_tree = app.query_one("#source-tree", Tree)
+            source_tree.select_node(source_tree.root.children[0].children[0])
+            await pilot.pause()
+            log_viewer = app.query_one("#log-viewer", RichLog)
+            assert len(log_viewer.lines) == 6
+
+            await pilot.click("#time-filter")
+            app.screen.query_one("#time-date", Input).value = "2026-09-14"
+            app.screen.query_one("#time-of-day", Input).value = "17:00:00"
+            await pilot.click("#time-apply")
+            assert [line.text for line in log_viewer.lines] == [
+                "2026-09-14T16:55:00 INFO: start",
+                "2026-09-14T17:00:00 INFO: center",
+                "2026-09-14T17:05:00 INFO: end",
+            ]
+
+            await pilot.click("#time-filter")
+            await pilot.click("#time-clear")
+            assert len(log_viewer.lines) == 6
+            await pilot.press("q")
 
     asyncio.run(run_test())
 

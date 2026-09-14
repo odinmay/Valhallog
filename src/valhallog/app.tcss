@@ -17,6 +17,12 @@ Screen {
     margin-bottom: 1;
 }
 
+#time-filter {
+    width: 14;
+    margin-left: 1;
+    margin-bottom: 1;
+}
+
 #status {
     width: 1fr;
     content-align: right middle;
@@ -79,6 +85,77 @@ HelpScreen {
 #close-help {
     margin-top: 1;
     width: 12;
+}
+
+TimeFilterScreen {
+    align: center middle;
+    background: $background 80%;
+}
+
+#time-filter-dialog {
+    width: 58;
+    height: auto;
+    padding: 1 2;
+    border: solid $panel;
+    background: $surface;
+}
+
+#time-filter-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#time-filter-instructions {
+    margin-bottom: 1;
+}
+
+#time-date-row,
+#time-of-day-row {
+    height: 3;
+    align: left middle;
+}
+
+#time-date-row Static,
+#time-of-day-row Static {
+    width: 18;
+}
+
+#time-date-row Input,
+#time-of-day-row Input {
+    width: 1fr;
+}
+
+#time-window-controls {
+    height: 3;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+#time-window-controls Static {
+    width: 18;
+}
+
+#time-window-controls Input {
+    width: 8;
+    margin: 0 1;
+}
+
+#time-window-controls Button {
+    width: 5;
+}
+
+#time-filter-error {
+    color: $error;
+    height: 2;
+}
+
+#time-filter-actions {
+    height: 3;
+    align: right middle;
+}
+
+#time-filter-actions Button {
+    margin-left: 1;
 }
 
 AddSourceScreen {
