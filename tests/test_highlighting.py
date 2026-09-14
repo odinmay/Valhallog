@@ -40,3 +40,42 @@ def test_highlight_log_line_leaves_unrecognized_message_words_unstyled() -> None
     assert [(span.start, span.end, span.style) for span in highlighted.spans] == [
         (4, 8, "green"),
     ]
+
+
+def test_highlight_log_line_styles_common_log_entities() -> None:
+    line = (
+        "INFO sshd.service pid=123 from 192.168.1.10 port=22 "
+        "path=/var/log/auth.log dev=/dev/sda1 interface=enp0s3 "
+        "mac=aa:bb:cc:dd:ee:ff https://example.com."
+    )
+
+    highlighted = highlight_log_line(line)
+    spans = {
+        (line[span.start:span.end], span.style)
+        for span in highlighted.spans
+    }
+
+    assert ("sshd.service", "magenta") in spans
+    assert ("pid=123", "bright_magenta") in spans
+    assert ("192.168.1.10", "bright_cyan") in spans
+    assert ("port=22", "yellow") in spans
+    assert ("/var/log/auth.log", "blue") in spans
+    assert ("/dev/sda1", "bold yellow") in spans
+    assert ("enp0s3", "bold yellow") in spans
+    assert ("aa:bb:cc:dd:ee:ff", "bright_green") in spans
+    assert ("https://example.com", "underline blue") in spans
+    assert ("//example.com", "blue") not in spans
+
+
+def test_highlight_log_line_supports_ipv6_and_bracketed_process_ids() -> None:
+    line = "kernel[456]: connected to fe80::1 on nvme0n1p2"
+
+    highlighted = highlight_log_line(line)
+    spans = {
+        (line[span.start:span.end], span.style)
+        for span in highlighted.spans
+    }
+
+    assert ("[456]", "bright_magenta") in spans
+    assert ("fe80::1", "bright_cyan") in spans
+    assert ("nvme0n1p2", "bold yellow") in spans

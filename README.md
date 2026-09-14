@@ -65,11 +65,14 @@ Pressing `a` adds one folder source and saves it immediately to the TOML
 configuration after confirmation. The folder name is suggested as the source
 name, and duplicate folder paths are rejected. Pressing `r` renames the
 highlighted configured source and saves that change immediately.
-Regular-file reads run in the background so the interface remains responsive.
+Regular-file reads run in the background in incremental batches, with a
+percentage spinner shown while large files are loading, so the interface
+remains responsive.
 Plain-file filtering uses level tokens such as `DEBUG`, `INFO`, `WARN`,
 `ERROR`, and `CRITICAL`; journal filtering uses native journal priorities.
-The viewer highlights recognized severity tokens and common ISO, time-only,
-and syslog timestamps while leaving the rest of each log message unchanged.
+The viewer highlights recognized severity tokens, timestamps, URLs, IP and MAC
+addresses, process IDs, paths, services, kernel devices, ports, and common
+structured fields while leaving the rest of each log message unchanged.
 Use the `Time` button beside the level selector to choose an editable date,
 center time, and inclusive ±minute window. The default date is today and the
 default window is ±5 minutes. `J` and `K` adjust the window only while that
@@ -77,6 +80,8 @@ menu is open. Time filtering applies to regular files and journal sources;
 timestamps with an explicit offset use that offset, while timestamps without
 one use the machine's local timezone. Regular files are read in full so a
 time filter can find older entries.
+While follow mode is active, an animated footer below the viewer indicates
+that Valhallog is waiting for new lines.
 
 ## Current limitations
 

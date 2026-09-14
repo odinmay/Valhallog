@@ -43,8 +43,18 @@ Screen {
 }
 
 #log-title,
-#log-viewer {
+#log-viewer,
+#load-indicator,
+#follow-indicator {
     layer: content;
+}
+
+#load-indicator,
+#follow-indicator {
+    height: 1;
+    padding: 0 1;
+    color: $accent;
+    background: $surface;
 }
 
 #splash {

@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -48,6 +48,8 @@ SOURCE_PANEL_DEFAULT_PERCENT = 20
 SOURCE_PANEL_MIN_PERCENT = 15
 SOURCE_PANEL_MAX_PERCENT = 60
 SOURCE_PANEL_STEP_PERCENT = 5
+LOG_HORIZONTAL_SCROLL_STEP = 2
+FILE_LOAD_BATCH_SIZE = 250
 _VALKNUT_BASE = r"""
  ___      ___ ________  ___  ___  ________  ___       ___       ________  ________ 
 |\  \    /  /|\   __  \|\  \|\  \|\   __  \|\  \     |\  \     |\   __  \|\   ____\    
@@ -79,6 +81,84 @@ class ValknutSplash(Static):
     def _refresh_art(self) -> None:
         if self.size.width and self.size.height:
             self.update(_valknut_splash(self.size.width, self.size.height))
+
+
+class FollowIndicator(Static):
+    """Animate a one-line visual cue while a source is being followed."""
+
+    _FRAMES = ("|", "/", "-", "\\")
+
+    def on_mount(self) -> None:
+        self._frame_index = 0
+        self.styles.display = "none"
+        self.set_interval(0.35, self._advance)
+
+    def _advance(self) -> None:
+        """Advance the spinner without changing the log contents."""
+        if self.styles.display == "none":
+            return
+        self._frame_index = (self._frame_index + 1) % len(self._FRAMES)
+        self.update(f"{self._FRAMES[self._frame_index]} Following — waiting for new lines")
+
+    def start(self) -> None:
+        """Show and reset the follow-mode animation."""
+        self._frame_index = 0
+        self.update(f"{self._FRAMES[0]} Following — waiting for new lines")
+        self.styles.display = "block"
+
+    def stop(self) -> None:
+        """Hide the follow-mode animation."""
+        self.styles.display = "none"
+
+
+class LoadIndicator(Static):
+    """Animate file-loading progress without blocking the log viewer."""
+
+    _FRAMES = ("|", "/", "-", "\\")
+
+    def on_mount(self) -> None:
+        self._frame_index = 0
+        self._file_name = ""
+        self._bytes_read = 0
+        self._total_bytes = 0
+        self.styles.display = "none"
+        self.set_interval(0.35, self._advance)
+
+    def _render_indicator(self) -> None:
+        if self._total_bytes:
+            percent = min(100, int(self._bytes_read * 100 / self._total_bytes))
+            progress = f"{percent:3d}%"
+        else:
+            progress = "  0%"
+        self.update(
+            f"{self._FRAMES[self._frame_index]} Loading {self._file_name}… "
+            f"{progress}"
+        )
+
+    def _advance(self) -> None:
+        """Advance the spinner while preserving the latest progress."""
+        if self.styles.display == "none":
+            return
+        self._frame_index = (self._frame_index + 1) % len(self._FRAMES)
+        self._render_indicator()
+
+    def start(self, file_name: str, total_bytes: int) -> None:
+        """Show a fresh loading indicator for one file."""
+        self._frame_index = 0
+        self._file_name = file_name
+        self._bytes_read = 0
+        self._total_bytes = total_bytes
+        self._render_indicator()
+        self.styles.display = "block"
+
+    def update_progress(self, bytes_read: int) -> None:
+        """Update the displayed byte progress."""
+        self._bytes_read = bytes_read
+        self._render_indicator()
+
+    def stop(self) -> None:
+        """Hide the loading indicator."""
+        self.styles.display = "none"
 
 
 class HelpScreen(ModalScreen[None]):
@@ -116,7 +196,10 @@ class HelpScreen(ModalScreen[None]):
                 "Escape  Close this help\n\n"
                 "Choose a source from the tree. Use the level selector to filter\n"
                 "plain files or set the native journal priority. Use the time menu\n"
-                "to filter both source types by an inclusive timestamp window.\n\n"
+                "to filter both source types by an inclusive timestamp window.\n"
+                "The viewer highlights timestamps, severities, URLs, IP addresses,\n"
+                "MAC addresses, process IDs, paths, services, devices, ports,\n"
+                "and common structured log fields.\n\n"
                 f"Config: {config_text}",
                 id="help-content",
             ),
@@ -310,7 +393,11 @@ class ValhallogApp(App[None]):
     _following = False
     _follow_worker: Worker[None] | None = None
     _journal_follow_worker: Worker[None] | None = None
-    _file_worker: Worker[list[str]] | None = None
+    _file_worker: Worker[None] | None = None
+    _file_loading = False
+    _file_bytes_read = 0
+    _file_total_bytes = 0
+    _file_visible_count = 0
     _journal_worker: Worker[None] | None = None
 
     BINDINGS = [
@@ -419,6 +506,8 @@ class ValhallogApp(App[None]):
                         markup=False,
                         max_lines=None,
                     ),
+                    LoadIndicator(id="load-indicator"),
+                    FollowIndicator(id="follow-indicator"),
                     id="log-pane",
                 ),
                 id="main-content",
@@ -439,6 +528,10 @@ class ValhallogApp(App[None]):
         self._follow_worker = None
         self._journal_follow_worker = None
         self._file_worker = None
+        self._file_loading = False
+        self._file_bytes_read = 0
+        self._file_total_bytes = 0
+        self._file_visible_count = 0
         self._journal_worker = None
         source_tree = self.query_one("#source-tree", Tree)
         status = self.query_one("#status", Static)
@@ -547,6 +640,14 @@ class ValhallogApp(App[None]):
         log_viewer.clear()
         status.update(f"Loading {path}... | {self._filter_summary()}")
         self._raw_lines = []
+        self._file_loading = True
+        self._file_bytes_read = 0
+        self._file_visible_count = 0
+        try:
+            self._file_total_bytes = path.stat().st_size
+        except OSError:
+            self._file_total_bytes = 0
+        self._show_load_indicator(path.name, self._file_total_bytes)
         self._file_worker = self.run_worker(
             self._read_file_worker(path),
             name="load-file",
@@ -555,10 +656,12 @@ class ValhallogApp(App[None]):
             exit_on_error=False,
         )
 
-    async def _read_file_worker(self, path: Path) -> list[str]:
-        """Read a file off the UI loop and return its lines to the worker."""
+    async def _read_file_worker(self, path: Path) -> None:
+        """Read and publish file batches without blocking the UI loop."""
         loop = asyncio.get_running_loop()
-        result: asyncio.Future[list[str]] = loop.create_future()
+        queue: asyncio.Queue[tuple[list[str], int] | BaseException | None]
+        queue = asyncio.Queue()
+        stop_event = Event()
 
         def publish(callback) -> None:
             """Publish a reader result unless the app loop is already closed."""
@@ -569,21 +672,40 @@ class ValhallogApp(App[None]):
 
         def read_file() -> None:
             try:
-                lines = FileLogReader(path).read_recent_lines(None)
+                for batch, bytes_read in FileLogReader(path).iter_line_batches(
+                    FILE_LOAD_BATCH_SIZE
+                ):
+                    if stop_event.is_set():
+                        return
+                    publish(
+                        lambda batch=batch, bytes_read=bytes_read: queue.put_nowait(
+                            (batch, bytes_read)
+                        )
+                    )
             except Exception as error:
-                publish(
-                    lambda error=error: not result.done()
-                    and result.set_exception(error)
-                )
-            else:
-                publish(lambda: not result.done() and result.set_result(lines))
+                publish(lambda error=error: queue.put_nowait(error))
+            finally:
+                publish(lambda: queue.put_nowait(None))
 
         Thread(
             target=read_file,
             name="valhallog-file-reader",
             daemon=True,
         ).start()
-        return await result
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                batch, bytes_read = item
+                if self._selected_path != path:
+                    return
+                self._append_file_batch(path, batch, bytes_read)
+                await asyncio.sleep(0)
+        finally:
+            stop_event.set()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Apply a file worker result on the UI thread if it is still current."""
@@ -594,6 +716,8 @@ class ValhallogApp(App[None]):
         if path is None:
             return
         if event.state == WorkerState.ERROR:
+            self._file_loading = False
+            self._hide_load_indicator()
             error = event.worker.error
             if isinstance(error, PermissionError):
                 message = f"Permission denied: {path}"
@@ -609,9 +733,46 @@ class ValhallogApp(App[None]):
         if event.state != WorkerState.SUCCESS:
             return
 
-        self._raw_lines = list(event.worker.result or [])
-        self._render_file_lines()
+        self._file_loading = False
+        self._hide_load_indicator()
+        self._update_file_status()
         self._file_worker = None
+
+    def _append_file_batch(
+        self, path: Path, lines: list[str], bytes_read: int
+    ) -> None:
+        """Append one background batch to the active file view."""
+        if self._selected_path != path:
+            return
+        if self._raw_lines is None:
+            self._raw_lines = []
+        self._raw_lines.extend(lines)
+        visible_lines = [
+            line
+            for line in lines
+            if should_show(line, self._active_level, self._active_time_window)
+        ]
+        self._write_log_lines(visible_lines)
+        visible_count = len(visible_lines)
+        self._file_visible_count += visible_count
+        self._file_bytes_read = bytes_read
+        self._update_load_indicator(bytes_read)
+        self._update_file_status()
+
+    def _update_file_status(self) -> None:
+        """Update the file count/progress status without rereading the file."""
+        if self._selected_path is None or self._raw_lines is None:
+            return
+        if self._file_loading:
+            self.query_one("#status", Static).update(
+                f"Loading {self._selected_path.name}: {self._file_visible_count} visible of "
+                f"{len(self._raw_lines)} line(s) | {self._filter_summary()}"
+            )
+            return
+        self.query_one("#status", Static).update(
+            f"Loaded {self._file_visible_count} of {len(self._raw_lines)} line(s) from "
+            f"{self._selected_path} | {self._filter_summary()}"
+        )
 
     def _render_file_lines(self) -> None:
         """Render the cached file lines using the active severity filter."""
@@ -624,12 +785,22 @@ class ValhallogApp(App[None]):
         )
         log_viewer = self.query_one("#log-viewer", RichLog)
         log_viewer.clear()
-        for line in visible_lines:
-            log_viewer.write(highlight_log_line(line))
-        self.query_one("#status", Static).update(
-            f"Loaded {len(visible_lines)} of {len(self._raw_lines)} line(s) from "
-            f"{self._selected_path} | {self._filter_summary()}"
-        )
+        self._write_log_lines(visible_lines)
+        self._file_visible_count = len(visible_lines)
+        self._update_file_status()
+
+    def _write_log_lines(self, lines: list[str]) -> None:
+        """Write a batch without recalculating the scroll position per line."""
+        log_viewer = self.query_one("#log-viewer", RichLog)
+        auto_scroll = log_viewer.auto_scroll
+        log_viewer.auto_scroll = False
+        try:
+            for line in lines:
+                log_viewer.write(highlight_log_line(line))
+        finally:
+            log_viewer.auto_scroll = auto_scroll
+        if auto_scroll:
+            log_viewer.scroll_end(animate=False, immediate=False, x_axis=False)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """Apply a new level filter to the active source."""
@@ -790,6 +961,7 @@ class ValhallogApp(App[None]):
         except OSError:
             start_offset = 0
         self._following = True
+        self._show_follow_indicator()
         self._follow_worker = self.run_worker(
             self._follow_file(path, poll_ms, start_offset),
             name="follow-file",
@@ -804,6 +976,7 @@ class ValhallogApp(App[None]):
     def _stop_follow(self) -> None:
         """Request cancellation of the active file or journal follow worker."""
         self._following = False
+        self._hide_follow_indicator()
         if self._follow_worker is not None and not self._follow_worker.is_finished:
             self._follow_worker.cancel()
         self._follow_worker = None
@@ -822,6 +995,9 @@ class ValhallogApp(App[None]):
 
     def _stop_file(self) -> None:
         """Request cancellation of the active file reader."""
+        self._file_loading = False
+        self._file_visible_count = 0
+        self._hide_load_indicator()
         if self._file_worker is not None and not self._file_worker.is_finished:
             self._file_worker.cancel()
         self._file_worker = None
@@ -832,6 +1008,45 @@ class ValhallogApp(App[None]):
         self._stop_file()
         self._stop_journal()
 
+    def _show_follow_indicator(self) -> None:
+        """Show the animated footer beneath the log viewer."""
+        try:
+            self.query_one("#follow-indicator", FollowIndicator).start()
+        except NoMatches:
+            pass
+
+    def _show_load_indicator(self, file_name: str, total_bytes: int) -> None:
+        """Show the animated progress footer for a file load."""
+        try:
+            self.query_one("#load-indicator", LoadIndicator).start(
+                file_name, total_bytes
+            )
+        except NoMatches:
+            pass
+
+    def _update_load_indicator(self, bytes_read: int) -> None:
+        """Update the animated progress footer for a file load."""
+        try:
+            self.query_one("#load-indicator", LoadIndicator).update_progress(
+                bytes_read
+            )
+        except NoMatches:
+            pass
+
+    def _hide_load_indicator(self) -> None:
+        """Hide the animated progress footer for a file load."""
+        try:
+            self.query_one("#load-indicator", LoadIndicator).stop()
+        except NoMatches:
+            pass
+
+    def _hide_follow_indicator(self) -> None:
+        """Hide the animated footer beneath the log viewer."""
+        try:
+            self.query_one("#follow-indicator", FollowIndicator).stop()
+        except NoMatches:
+            pass
+
     def _start_journal_follow(self, source: SourceConfig) -> None:
         """Start a journalctl follow stream for the selected source."""
         if self.config is None:
@@ -841,6 +1056,7 @@ class ValhallogApp(App[None]):
         self.query_one("#log-title", Static).update(source.name)
         self.query_one("#log-viewer", RichLog).clear()
         self._following = True
+        self._show_follow_indicator()
         self._journal_follow_worker = self.run_worker(
             self._follow_journal(
                 source,
@@ -884,10 +1100,12 @@ class ValhallogApp(App[None]):
         except JournalError as exc:
             if self._selected_source is source and self._following:
                 self._following = False
+                self._hide_follow_indicator()
                 status.update(str(exc))
         except OSError as exc:
             if self._selected_source is source and self._following:
                 self._following = False
+                self._hide_follow_indicator()
                 status.update(f"Could not start journalctl: {exc.strerror or exc}")
 
     async def _follow_file(self, path: Path, poll_ms: int, start_offset: int) -> None:
@@ -1069,7 +1287,8 @@ class ValhallogApp(App[None]):
         """Scroll the log left or collapse the highlighted source tree node."""
         log_viewer = self.query_one("#log-viewer", RichLog)
         if log_viewer.has_focus:
-            log_viewer.action_scroll_left()
+            for _ in range(LOG_HORIZONTAL_SCROLL_STEP):
+                log_viewer.action_scroll_left()
             return
         source_tree = self.query_one("#source-tree", Tree)
         if source_tree.has_focus:
@@ -1079,7 +1298,8 @@ class ValhallogApp(App[None]):
         """Scroll the log right or expand/open the highlighted source node."""
         log_viewer = self.query_one("#log-viewer", RichLog)
         if log_viewer.has_focus:
-            log_viewer.action_scroll_right()
+            for _ in range(LOG_HORIZONTAL_SCROLL_STEP):
+                log_viewer.action_scroll_right()
             return
         source_tree = self.query_one("#source-tree", Tree)
         if source_tree.has_focus:

@@ -60,3 +60,13 @@ def test_file_log_reader_can_return_every_line(tmp_path: Path) -> None:
         "two",
         "three",
     ]
+
+
+def test_file_log_reader_yields_batches_with_byte_progress(tmp_path: Path) -> None:
+    log_path = tmp_path / "example.log"
+    log_path.write_bytes(b"one\ntwo\nthree\n")
+
+    assert list(FileLogReader(log_path).iter_line_batches(2)) == [
+        (["one", "two"], 8),
+        (["three"], 14),
+    ]

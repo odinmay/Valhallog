@@ -4,6 +4,8 @@ from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Stat
 
 from valhallog.app import (
     HelpScreen,
+    FollowIndicator,
+    LoadIndicator,
     TimeFilterScreen,
     ValhallogApp,
     _VALKNUT_BASE,
@@ -37,6 +39,7 @@ def test_app_renders_hello_screen(monkeypatch) -> None:
             assert app.query_one(Footer)
             assert app.query_one("#source-tree", Tree)
             assert app.query_one("#log-viewer", RichLog)
+            assert app.query_one("#load-indicator", LoadIndicator)
             assert app.query_one("#level-select", Select).value == "all"
             assert "[v] All" in str(
                 app.query_one("#level-select #label", Static).render()
@@ -117,6 +120,11 @@ def test_app_displays_configured_sources(monkeypatch, tmp_path: Path) -> None:
 
             await pilot.press("f")
             assert app._following is True
+            indicator = app.query_one("#follow-indicator", FollowIndicator)
+            assert indicator.styles.display == "block"
+            first_frame = str(indicator.render())
+            indicator._advance()
+            assert str(indicator.render()) != first_frame
             with (logs_path / "example.log").open("a") as log_file:
                 log_file.write("ERROR: followed\n")
                 log_file.flush()
@@ -128,6 +136,7 @@ def test_app_displays_configured_sources(monkeypatch, tmp_path: Path) -> None:
 
             await pilot.press("f")
             assert app._following is False
+            assert indicator.styles.display == "none"
             with (logs_path / "example.log").open("a") as log_file:
                 log_file.write("ERROR: ignored\n")
                 log_file.flush()
@@ -319,10 +328,10 @@ def test_file_read_runs_off_the_ui_thread(monkeypatch, tmp_path: Path) -> None:
         def __init__(self, path: Path):
             assert path == log_path
 
-        def read_recent_lines(self, max_lines: int) -> list[str]:
+        def iter_line_batches(self, batch_size: int):
             nonlocal reader_thread_id
             reader_thread_id = threading.get_ident()
-            return ["background read"]
+            yield ["background read"], len("background read\n")
 
     monkeypatch.setattr("valhallog.app.FileLogReader", FakeFileLogReader)
     app = ValhallogApp()
@@ -484,7 +493,7 @@ def test_vim_navigation_scrolls_active_log_or_moves_sources(monkeypatch) -> None
             assert scroll_calls == ["up", "down"]
             assert source_calls == []
             await pilot.press("h", "l")
-            assert horizontal_calls == ["left", "right"]
+            assert horizontal_calls == ["left", "left", "right", "right"]
             await pilot.press("K", "J")
             assert page_calls == ["up", "down"]
 

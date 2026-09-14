@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 
 TEXT_SUFFIXES = {".log", ".out", ".err", ".txt"}
@@ -27,6 +28,26 @@ class FileLogReader:
             for line in file:
                 lines.append(line.rstrip("\r\n"))
         return list(lines)
+
+    def iter_line_batches(
+        self, batch_size: int = 500
+    ) -> Iterator[tuple[list[str], int]]:
+        """Yield decoded lines in UI-sized batches with the byte offset read."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        batch: list[str] = []
+        with self.path.open("r", encoding="utf-8", errors="replace") as file:
+            while True:
+                line = file.readline()
+                if not line:
+                    break
+                batch.append(line.rstrip("\r\n"))
+                if len(batch) >= batch_size:
+                    yield batch, file.tell()
+                    batch = []
+            if batch:
+                yield batch, file.buffer.tell()
 
 
 def _is_skipped(path: Path) -> bool:
